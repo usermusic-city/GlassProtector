@@ -17,17 +17,14 @@ import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Glass 壳入口。加固引擎把原 APK 的 Application 类名改成本类，
- * 原 Application 与全部业务 DEX 被加密进 assets。
+ * 原 Application 与全部业务 DEX 被加密进 assets（或明文保留，视配置）。
  * <p>
  * 启动流程：
- * 1. attachBaseContext：解密配置 → 反篡改检测 → 解密 DEX → 注入宿主 ClassLoader → 替换回原 Application
+ * 1. attachBaseContext：读配置（Dex2C 时优先 native ELF 容器）→ 反篡改检测
+ *    → 逐个 SHA-256 完整性校验 → 解密 DEX（明文模式直读）→ 注入宿主 ClassLoader → 替换回原 Application
  * 2. onCreate：回调原 Application 的 onCreate
  */
 public class GlassApplication extends Application {
-
-    private static final String DATA_ASSET = "glass.dat";
-    private static final String DEX_ASSET_PREFIX = "glass_dex_";
-    private static final String DEX_ASSET_SUFFIX = ".enc";
 
     private Application realApp;
 
@@ -44,20 +41,37 @@ public class GlassApplication extends Application {
     }
 
     private void bootstrap(Context base) throws Exception {
-        // 1. 读配置
-        ShellData cfg = ShellData.load(base.getAssets());
+        // 1. 读配置（Dex2C 模式优先从 nativeLibraryDir/libglass_core.so 提取）
+        ShellData cfg = ShellData.load(base);
+        if (cfg.fromElf) {
+            android.util.Log.i("GlassShell", "config loaded from native ELF container");
+        }
 
         // 2. 反篡改（命中即自杀，不返回）
         AntiTamper.check(base, cfg);
 
-        // 3. 解密全部 DEX
+        // 3. 逐个校验并解密 DEX（明文模式直读）
         byte[][] dexes = new byte[cfg.dexCount][];
         for (int i = 0; i < cfg.dexCount; i++) {
-            byte[] enc = ShellData.readAsset(base.getAssets(), DEX_ASSET_PREFIX + i + DEX_ASSET_SUFFIX);
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(cfg.aesKey, "AES"),
-                    new IvParameterSpec(cfg.aesIv));
-            dexes[i] = cipher.doFinal(enc);
+            String assetName = cfg.assetName(i);
+            byte[] enc = ShellData.readAsset(base.getAssets(), assetName);
+            // 完整性校验：载荷被篡改/替换时拒绝启动
+            String expect = cfg.expectedSha(i);
+            if (expect != null) {
+                String actual = sha256Hex(enc);
+                if (!expect.equalsIgnoreCase(actual)) {
+                    throw new SecurityException("dex payload integrity check failed: "
+                            + assetName);
+                }
+            }
+            if (cfg.dexEnc) {
+                Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+                cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(cfg.aesKey, "AES"),
+                        new IvParameterSpec(cfg.aesIv));
+                dexes[i] = cipher.doFinal(enc);
+            } else {
+                dexes[i] = enc;
+            }
         }
 
         // 4. 加载解密后的 DEX
@@ -69,6 +83,17 @@ public class GlassApplication extends Application {
 
         // 6. 替换回原 Application
         swapApplication(cfg.origApplication);
+    }
+
+    private static String sha256Hex(byte[] data) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] d = md.digest(data);
+        StringBuilder sb = new StringBuilder(d.length * 2);
+        for (byte x : d) {
+            sb.append(Character.forDigit((x >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(x & 0xF, 16));
+        }
+        return sb.toString();
     }
 
     private ClassLoader createLoader(Context base, byte[][] dexes, ClassLoader host) throws Exception {

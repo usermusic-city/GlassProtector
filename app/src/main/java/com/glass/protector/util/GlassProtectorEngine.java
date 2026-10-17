@@ -60,9 +60,13 @@ public class GlassProtectorEngine {
     private static final String CONFIG_ASSET = "glass.dat";
     private static final String DEX_ASSET_FORMAT = "glass_dex_%d.enc";
     private static final String SHELL_DEX_ASSET = "shell.dex";
+    private static final String JUNK_DEX_ASSET = "junk.dex";
+    private static final String ELF_SO_NAME = "libglass_core.so";
     private static final String KEYSTORE_ASSET = "glass.p12";
     private static final String KEYSTORE_PASSWORD = "glass123";
     private static final String KEYSTORE_ALIAS = "glass";
+    /** 资源混淆：全部条目时间戳归零到 DOS 纪元 1980-01-01（防时间线取证） */
+    private static final long META_SCRUB_TIME = 315532800000L;
     /** XOR 混淆盐，与壳 ShellData 保持一致 */
     private static final int[] XOR_SALT = {0x37, 0x51, 0x6C, 0x22, 0x4F, 0x19, 0x7A, 0x63,
             0x2E, 0x58, 0x41, 0x76, 0x33, 0x6D, 0x25, 0x4B};
@@ -119,8 +123,9 @@ public class GlassProtectorEngine {
         }
         log("  原 Application: " + (origApp == null ? "(无，使用默认)" : origApp));
 
-        // 2. 生成 AES 密钥并加密全部 DEX（流式落盘，不整块进内存）
-        log("[2/8] AES 加密 DEX ...");
+        // 2. 生成 AES 密钥并处理全部 DEX（流式落盘，不整块进内存）
+        boolean dexEnc = config.isDexEncrypt();
+        log("[2/8] " + (dexEnc ? "AES 加密 DEX ..." : "DEX 明文存储（dexEncrypt 关闭）..."));
         byte[] aesKey = new byte[16];
         new SecureRandom().nextBytes(aesKey);
         List<String> dexNames = listDexEntries(input);
@@ -130,15 +135,21 @@ public class GlassProtectorEngine {
         List<EncDex> encDexes = new ArrayList<>();
         long totalDexBytes = 0;
         for (int i = 0; i < dexNames.size(); i++) {
-            File encFile = new File(workDir, String.format(Locale.US, DEX_ASSET_FORMAT, i));
-            EncDex info = encryptDexToFile(input, dexNames.get(i), aesKey, encFile);
+            File encFile = new File(workDir, "payload_" + i + (dexEnc ? ".enc" : ".bin"));
+            EncDex info = dexEnc
+                    ? encryptDexToFile(input, dexNames.get(i), aesKey, encFile)
+                    : copyDexToFile(input, dexNames.get(i), encFile);
+            info.assetName = dexAssetName(i, config.isGlassStringEncrypt(), dexEnc);
+            info.sha256 = sha256File(encFile);
             encDexes.add(info);
             totalDexBytes += info.origSize;
-            log("  " + dexNames.get(i) + " (" + (info.origSize / 1024) + " KB) 已加密");
+            log("  " + dexNames.get(i) + " (" + (info.origSize / 1024) + " KB) "
+                    + (dexEnc ? "已加密" : "明文保留") + " → assets/" + info.assetName);
         }
-        log("  共加密 " + encDexes.size() + " 个 DEX，合计 " + (totalDexBytes / 1024) + " KB");
+        log("  共处理 " + encDexes.size() + " 个 DEX，合计 " + (totalDexBytes / 1024) + " KB"
+                + (dexEnc ? "" : "（明文模式）"));
 
-        // 3. 生成壳配置
+        // 3. 壳配置字段（JSON 统一在卢恩步骤之后序列化，避免字段丢失）
         log("[3/8] 生成壳配置 ...");
         String signSha256 = certSha256(keyStoreFile);
         JSONObject cfg = new JSONObject();
@@ -147,7 +158,20 @@ public class GlassProtectorEngine {
         cfg.put("signSha256", config.isGlassSignVerify() ? signSha256 : "");
         cfg.put("antiDebug", config.isGlassAntiDebug());
         cfg.put("antiFrida", config.isGlassAntiDebug());
-        byte[] cfgEnc = buildConfigBlob(aesKey, cfg);
+        cfg.put("dexEnc", dexEnc);
+        // 资产名映射（随机名或默认名）+ 完整性校验清单（防篡改，壳加载前逐一核对）
+        StringBuilder namesSb = new StringBuilder();
+        StringBuilder shasSb = new StringBuilder();
+        for (int i = 0; i < encDexes.size(); i++) {
+            if (i > 0) { namesSb.append(','); shasSb.append(','); }
+            namesSb.append(encDexes.get(i).assetName);
+            shasSb.append(encDexes.get(i).sha256);
+        }
+        cfg.put("dexAssets", namesSb.toString());
+        cfg.put("dexSha", shasSb.toString());
+        if (config.isGlassStringEncrypt()) {
+            log("  字符串加密: DEX 资产名已随机化（glass_dex_N → 随机 8 位 hex），映射藏于加密配置");
+        }
 
         // 4. 卢恩字符混淆（若开启）
         List<RuneObfuscator.RuneFile> runeFiles = null;
@@ -171,6 +195,17 @@ public class GlassProtectorEngine {
                         log("    " + s[0] + " -> " + s[1]);
                     }
                 }
+                // assets 加密：rune_data.bin 二次 AES（密钥藏于加密配置，壳不读取该文件，纯静态对抗）
+                if (config.isAssetsEncryptEnabled()) {
+                    for (int i = 0; i < runeFiles.size(); i++) {
+                        RuneObfuscator.RuneFile rf = runeFiles.get(i);
+                        if (rf.assetPath.endsWith("rune_data.bin")) {
+                            runeFiles.set(i, new RuneObfuscator.RuneFile(
+                                    rf.assetPath, aesEncrypt(aesKey, rf.data)));
+                            log("  assets加密: rune_data.bin 已二次 AES 加密");
+                        }
+                    }
+                }
             } catch (Exception e) {
                 log("  [warn] 卢恩混淆失败: " + e.getMessage() + "，跳过");
             }
@@ -188,9 +223,52 @@ public class GlassProtectorEngine {
                 manifestOut.getAbsolutePath(), property);
         byte[] newManifest = readFile(manifestOut);
 
+        // 5.5 序列化壳配置（在卢恩字段写入之后，修复字段丢失）
+        if (config.isDex2cEnabled()) {
+            cfg.put("elfCfg", true);   // 壳优先从 nativeLibraryDir/libglass_core.so 读配置
+        }
+        byte[] cfgEnc = buildConfigBlob(aesKey, cfg);
+
+        // 5.6 Dex2C：配置封装进手工构造的 ELF 容器（readelf 可验证的真 ELF）
+        byte[] elfSo64 = null, elfSo32 = null;
+        if (config.isDex2cEnabled()) {
+            elfSo64 = ElfBuilder.buildElf64(cfgEnc, "GlassProtector native config container");
+            elfSo32 = ElfBuilder.buildElf32(cfgEnc, "GlassProtector native config container");
+            log("  Dex2C: 配置已下沉 native 容器 lib/arm64-v8a/" + ELF_SO_NAME
+                    + " (ELF64, " + elfSo64.length + " B) 与 lib/armeabi-v7a/" + ELF_SO_NAME
+                    + " (ELF32, " + elfSo32.length + " B)");
+        }
+
+        // 5.7 垃圾代码：释放预编译 junk dex（不透明谓词 + 控制流平坦化）
+        File junkDex = null;
+        if (config.isGlassJunkCode()) {
+            try {
+                junkDex = extractAsset(JUNK_DEX_ASSET, new File(workDir, JUNK_DEX_ASSET));
+            } catch (Exception e) {
+                log("  [warn] junk.dex 资产缺失，垃圾代码注入跳过（需 CI 构建携带）");
+            }
+        }
+
+        // 5.8 assets 加密：生成高熵诱饵文件（干扰资产分析）
+        List<byte[]> decoys = null;
+        if (config.isAssetsEncryptEnabled()) {
+            decoys = new ArrayList<>();
+            SecureRandom sr = new SecureRandom();
+            int n = 3 + sr.nextInt(4);
+            long decoyBytes = 0;
+            for (int i = 0; i < n; i++) {
+                byte[] b = new byte[8192 + sr.nextInt(32768)];
+                sr.nextBytes(b);
+                decoys.add(b);
+                decoyBytes += b.length;
+            }
+            log("  assets加密: 生成 " + n + " 个高熵诱饵（合计 " + (decoyBytes / 1024) + " KB）");
+        }
+
         // 6. 重打包
         log("[6/8] 重打包 APK ...");
-        rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes, runeFiles);
+        rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes, runeFiles,
+                junkDex, elfSo64, elfSo32, decoys, config.isResourceObfuscate(), dexNames.size());
 
         // 7. zipalign
         log("[7/8] zipalign 对齐 ...");
@@ -206,9 +284,16 @@ public class GlassProtectorEngine {
         // 清理工作目录
         deleteRecursive(workDir);
         log("=== 加固完成: " + outApk.getAbsolutePath() + " ===");
-        log("加固说明: 原 DEX 已全部 AES 加密，运行时由壳解密加载；");
+        log("加固说明: 原 DEX 已" + (dexEnc ? "全部 AES 加密，运行时由壳解密加载" : "明文存储（dexEncrypt 关闭）")
+                + "；加载前逐一 SHA-256 完整性校验；");
         log("反调试: " + (config.isGlassAntiDebug() ? "开启" : "关闭")
-                + "，签名校验: " + (config.isGlassSignVerify() ? "开启" : "关闭"));
+                + "，签名校验: " + (config.isGlassSignVerify() ? "开启" : "关闭")
+                + "，字符串加密(资产名随机化): " + (config.isGlassStringEncrypt() ? "开启" : "关闭"));
+        log("资源混淆(元数据清零): " + (config.isResourceObfuscate() ? "开启" : "关闭")
+                + "，垃圾代码(junk dex): " + (config.isGlassJunkCode() ? "开启" : "关闭")
+                + "，Dex2C(native容器): " + (config.isDex2cEnabled() ? "开启" : "关闭"));
+        log("assets加密(二次AES+诱饵): " + (config.isAssetsEncryptEnabled() ? "开启" : "关闭")
+                + "，卢恩混淆: " + (config.isRuneObfuscateEnabled() ? "开启" : "关闭"));
         return outApk.getAbsolutePath();
     }
 
@@ -257,15 +342,19 @@ public class GlassProtectorEngine {
     // ---------------- 重打包 ----------------
 
     /**
-     * 流式重打包：原样复制所有 entry（保持 STORED/DEFLATED 与时间戳），
-     * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX 与加密 DEX。
+     * 流式重打包：原样复制所有 entry（保持 STORED/DEFLATED），
+     * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX、加密 DEX、
+     * junk dex、ELF 配置容器、卢恩产物与诱饵。
      */
     private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
                             byte[] configBlob, List<EncDex> encDexes,
-                            List<RuneObfuscator.RuneFile> runeFiles) throws Exception {
+                            List<RuneObfuscator.RuneFile> runeFiles, File junkDex,
+                            byte[] elfSo64, byte[] elfSo32, List<byte[]> decoys,
+                            boolean scrubMeta, int origDexCount) throws Exception {
         try (ZipFile zip = new ZipFile(input);
              ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
 
+            int scrubbed = 0;
             Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry e = entries.nextElement();
@@ -276,34 +365,61 @@ public class GlassProtectorEngine {
                         && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA")
                         || name.endsWith(".EC") || name.endsWith(".MF"))) continue;       // 旧签名
                 if (name.startsWith("assets/rune_obf/")) continue;                       // 清旧 rune 产物
+                if (name.equals("lib/arm64-v8a/" + ELF_SO_NAME)
+                        || name.equals("lib/armeabi-v7a/" + ELF_SO_NAME)) continue;      // 清旧 ELF 容器
 
-                copyEntry(zip, zos, e);
+                copyEntry(zip, zos, e, scrubMeta);
+                if (scrubMeta) scrubbed++;
+            }
+            if (scrubMeta) {
+                log("  资源混淆: " + scrubbed + " 个原条目时间戳已清零(1980-01-01)、extra 已剥离");
             }
 
+            long ts = scrubMeta ? META_SCRUB_TIME : System.currentTimeMillis();
             // 新 manifest
-            putEntry(zos, "AndroidManifest.xml", newManifest, ZipEntry.DEFLATED);
+            putEntry(zos, "AndroidManifest.xml", newManifest, ZipEntry.DEFLATED, ts);
             // 壳 DEX 作为主 DEX
-            putEntry(zos, "classes.dex", readFile(shellDex), ZipEntry.DEFLATED);
+            putEntry(zos, "classes.dex", readFile(shellDex), ZipEntry.DEFLATED, ts);
             // 配置
-            putEntry(zos, "assets/" + CONFIG_ASSET, configBlob, ZipEntry.DEFLATED);
-            // 加密 DEX（从落盘文件流式写入；密文不可压缩，用 STORED 免去无谓 CPU）
+            putEntry(zos, "assets/" + CONFIG_ASSET, configBlob, ZipEntry.DEFLATED, ts);
+            // DEX 载荷（从落盘文件流式写入；密文不可压缩，用 STORED 免去无谓 CPU）
             for (int i = 0; i < encDexes.size(); i++) {
                 EncDex d = encDexes.get(i);
-                putFileEntry(zos, String.format(Locale.US, "assets/" + DEX_ASSET_FORMAT, i),
-                        d.file, d.size, d.crc);
+                putFileEntry(zos, "assets/" + d.assetName, d.file, d.size, d.crc, ts);
             }
             // 卢恩混淆产物
             if (runeFiles != null) {
                 for (RuneObfuscator.RuneFile rf : runeFiles) {
-                    putEntry(zos, rf.assetPath, rf.data, ZipEntry.DEFLATED);
+                    putEntry(zos, rf.assetPath, rf.data, ZipEntry.DEFLATED, ts);
+                }
+            }
+            // 垃圾代码：junk dex 作为附加 classes(N+1).dex（真实类，干扰反编译分析）
+            if (junkDex != null && junkDex.isFile()) {
+                String junkName = "classes" + (origDexCount + 1) + ".dex";
+                putEntry(zos, junkName, readFile(junkDex), ZipEntry.DEFLATED, ts);
+                log("  垃圾代码: 已注入 " + junkName + " (" + (junkDex.length() / 1024) + " KB)");
+            }
+            // Dex2C：ELF 配置容器（extractNativeLibs=true 时安装期解压到 nativeLibraryDir）
+            if (elfSo64 != null) {
+                putEntry(zos, "lib/arm64-v8a/" + ELF_SO_NAME, elfSo64, ZipEntry.DEFLATED, ts);
+            }
+            if (elfSo32 != null) {
+                putEntry(zos, "lib/armeabi-v7a/" + ELF_SO_NAME, elfSo32, ZipEntry.DEFLATED, ts);
+            }
+            // assets 加密：高熵诱饵
+            if (decoys != null) {
+                for (byte[] d : decoys) {
+                    putEntry(zos, "assets/" + randomHex(8) + ".bin", d, ZipEntry.DEFLATED, ts);
                 }
             }
         }
     }
 
-    private static void copyEntry(ZipFile zip, ZipOutputStream zos, ZipEntry e) throws Exception {
+    private static void copyEntry(ZipFile zip, ZipOutputStream zos, ZipEntry e, boolean scrub)
+            throws Exception {
         ZipEntry out = new ZipEntry(e.getName());
-        out.setTime(e.getTime());
+        // 资源混淆：时间戳统一清零；new ZipEntry 不复制 extra，天然剥离
+        out.setTime(scrub ? META_SCRUB_TIME : e.getTime());
         if (e.getMethod() == ZipEntry.STORED) {
             // resources.arsc 等 STORED 条目必须保持不压缩（targetSdk 30+ 安装要求）
             out.setMethod(ZipEntry.STORED);
@@ -318,9 +434,10 @@ public class GlassProtectorEngine {
         zos.closeEntry();
     }
 
-    private static void putEntry(ZipOutputStream zos, String name, byte[] data, int method) throws Exception {
+    private static void putEntry(ZipOutputStream zos, String name, byte[] data, int method, long ts)
+            throws Exception {
         ZipEntry e = new ZipEntry(name);
-        e.setTime(System.currentTimeMillis());
+        e.setTime(ts);
         if (method == ZipEntry.STORED) {
             e.setMethod(ZipEntry.STORED);
             e.setSize(data.length);
@@ -333,10 +450,10 @@ public class GlassProtectorEngine {
     }
 
     /** 从文件流式写入 STORED entry（size/crc 需预知，由加密落盘时记录） */
-    private static void putFileEntry(ZipOutputStream zos, String name, File f, long size, long crc)
-            throws Exception {
+    private static void putFileEntry(ZipOutputStream zos, String name, File f, long size, long crc,
+                                     long ts) throws Exception {
         ZipEntry e = new ZipEntry(name);
-        e.setTime(System.currentTimeMillis());
+        e.setTime(ts);
         e.setMethod(ZipEntry.STORED);
         e.setSize(size);
         e.setCompressedSize(size);
@@ -348,12 +465,16 @@ public class GlassProtectorEngine {
         zos.closeEntry();
     }
 
-    /** 加密 DEX 的落盘产物（size/crc 为密文属性，供 STORED 写入 zip） */
+    /** DEX 载荷的落盘产物（size/crc 为密文属性，供 STORED 写入 zip） */
     private static final class EncDex {
         final File file;
         final long size;
         final long crc;
         final long origSize;
+        /** 最终写入 APK 的资产名（默认名或随机名） */
+        String assetName;
+        /** 载荷文件 SHA-256（hex），壳加载前校验 */
+        String sha256;
 
         EncDex(File file, long size, long crc, long origSize) {
             this.file = file;
@@ -361,6 +482,65 @@ public class GlassProtectorEngine {
             this.crc = crc;
             this.origSize = origSize;
         }
+    }
+
+    /** dexEncrypt 关闭时的明文落盘：流式复制 + CRC32 记录 */
+    private static EncDex copyDexToFile(File apk, String dexName, File out) throws Exception {
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        long origSize;
+        try (ZipFile zip = new ZipFile(apk)) {
+            ZipEntry e = zip.getEntry(dexName);
+            if (e == null) {
+                throw new Exception("APK 中缺少条目 " + dexName);
+            }
+            origSize = e.getSize();
+            try (InputStream in = new BufferedInputStream(zip.getInputStream(e));
+                 java.util.zip.CheckedOutputStream cos = new java.util.zip.CheckedOutputStream(
+                         new BufferedOutputStream(new FileOutputStream(out)), crc)) {
+                transfer(in, cos);
+            }
+        }
+        return new EncDex(out, out.length(), crc.getValue(), origSize);
+    }
+
+    /** 流式计算文件 SHA-256（hex 小写） */
+    private static String sha256File(File f) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        try (InputStream in = new BufferedInputStream(new FileInputStream(f))) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                md.update(buf, 0, n);
+            }
+        }
+        return bytesToHex(md.digest());
+    }
+
+    private static String bytesToHex(byte[] b) {
+        StringBuilder sb = new StringBuilder(b.length * 2);
+        for (byte x : b) {
+            sb.append(Character.forDigit((x >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(x & 0xF, 16));
+        }
+        return sb.toString();
+    }
+
+    /** DEX 资产名：字符串加密开启时随机化，否则默认名 */
+    private static String dexAssetName(int i, boolean randomize, boolean dexEnc) {
+        if (randomize) {
+            return randomHex(8) + ".gdx";
+        }
+        return dexEnc ? String.format(Locale.US, DEX_ASSET_FORMAT, i)
+                      : String.format(Locale.US, "glass_dex_%d.bin", i);
+    }
+
+    private static String randomHex(int len) {
+        SecureRandom r = new SecureRandom();
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) {
+            sb.append(Character.forDigit(r.nextInt(16), 16));
+        }
+        return sb.toString();
     }
 
     /**

@@ -33,6 +33,18 @@ jobs:
           cd "$OLDPWD"
           ls -la app/src/main/assets/shell.dex
 
+      # ============ 阶段 1.5：生成 junk.dex（垃圾代码注入载荷） ============
+
+      - name: Generate junk.dex (junk code payload)
+        run: |
+          rm -rf /tmp/junk && mkdir -p /tmp/junk/classes
+          python3 scripts/gen_junk.py > /tmp/junk/Junk.java
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          javac --release 8 -nowarn -d /tmp/junk/classes /tmp/junk/Junk.java
+          "$BT/d8" --release --min-api 24 --output /tmp/junk /tmp/junk/classes/*.class
+          mv /tmp/junk/classes.dex app/src/main/assets/junk.dex
+          ls -la app/src/main/assets/junk.dex
+
       # ============ 阶段 2：构建 GlassProtector APK ============
 
       - name: Build GlassProtector APK
