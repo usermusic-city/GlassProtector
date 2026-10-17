@@ -1,0 +1,237 @@
+import groovy.json.JsonOutput
+
+import java.nio.file.Files
+import java.nio.file.Paths
+
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.luoye.dpt'
+    compileSdk rootProject.ext.compileSdkVersion
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    defaultConfig {
+        applicationId "com.luoye.dpt"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode rootProject.ext.appVersionCode
+        versionName rootProject.ext.appVersionName
+
+        multiDexEnabled false
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++20"
+                abiFilters "armeabi-v7a","arm64-v8a","x86","x86_64"
+                arguments("-DSO_NAME=${soName}", "-DDPT_BUILD_KEY=${dptBuildKey}")
+            }
+        }
+
+        buildConfigField "String", "SO_NAME", "\"${fullSoName}\""
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+
+        debug {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version rootProject.ext.cmakeVersion
+        }
+    }
+    compileOptions {
+        sourceCompatibility rootProject.ext.shellJavaVersion
+        targetCompatibility rootProject.ext.shellJavaVersion
+    }
+}
+
+def afterAssembleCopy(Project project, Map archMap, boolean debug) {
+    def buildTypeName = null
+    def dexSourceDirName = null
+    def soFileTypeName = null
+    def sourceSoLibsDir = null
+    if(debug) {
+        buildTypeName = "debug"
+        dexSourceDirName = "mergeDexDebug"
+        soFileTypeName = "merged_native_libs"
+        sourceSoLibsDir = file(project.buildDir.absolutePath + File.separator
+                + "intermediates" + File.separator
+                + soFileTypeName + File.separator
+                + buildTypeName + File.separator
+                + "mergeDebugNativeLibs" + File.separator
+                + "out" + File.separator
+                + "lib" + File.separator
+        )
+
+    }
+    else {
+        buildTypeName = "release"
+        dexSourceDirName = "minifyReleaseWithR8"
+        soFileTypeName = "stripped_native_libs"
+        sourceSoLibsDir = file(project.buildDir.absolutePath + File.separator
+                + "intermediates" + File.separator
+                + soFileTypeName + File.separator
+                + buildTypeName + File.separator
+                + "stripReleaseDebugSymbols" + File.separator
+                + "out" + File.separator
+                + "lib" + File.separator
+        )
+    }
+
+    def targetDir = file(project.rootDir.absolutePath + File.separator + "executable" + File.separator + "shell-files")
+    def targetSoLibsDir = file(targetDir.absolutePath + File.separator + "libs")
+
+    println("[" + project.name + "] " + sourceSoLibsDir.absolutePath + " -> " + targetSoLibsDir.absolutePath)
+
+    def status = delete(fileTree(targetDir.absolutePath) {
+        include 'dex/classes.dex', "libs/**/*.so"
+    })
+
+    println("afterAssembleCopy shell-files delete status: " + status)
+
+    copy {
+        from project.buildDir.absolutePath + File.separator + "intermediates" + File.separator + "dex" + File.separator + buildTypeName + File.separator + dexSourceDirName + File.separator + "classes.dex"
+        into targetDir.absolutePath + File.separator + "dex"
+    }
+
+    for(e in archMap) {
+        copy {
+            include "**/${fullSoName}"
+            from file(sourceSoLibsDir.absolutePath + File.separator
+                    + e.key)
+            into file(targetSoLibsDir.absolutePath + File.separator
+                    + e.value)
+        }
+    }
+
+    // Keep encrypt/decrypt key next to the SO artifacts that dpt packages.
+    def buildKeyFile = new File(targetDir, "build-key")
+    buildKeyFile.text = "${dptBuildKey}\n"
+    println("[" + project.name + "] wrote build key -> " + buildKeyFile.absolutePath)
+
+    // Re-persist ids after assemble so a mid-build clean cannot leave them missing.
+    def idsFile = new File(project.rootDir, "build" + File.separator + "dpt-build-ids.properties")
+    idsFile.parentFile.mkdirs()
+    idsFile.text = "# dpt-shell build ids\nsoName=${soName}\ndptBuildKey=${dptBuildKey}\n"
+}
+
+def afterNativeBuildCopy(Project project, Map archMap, boolean debug) {
+    def buildTypeName = "release"
+    def subBuildTypeName = "mergeReleaseNativeLibs"
+    if(debug) {
+        buildTypeName = "debug"
+        subBuildTypeName = "mergeDebugNativeLibs"
+    }
+    def sourceDir = file(project.buildDir.absolutePath + File.separator
+            + "intermediates" + File.separator
+            + "merged_native_libs" + File.separator
+            + buildTypeName + File.separator
+            + subBuildTypeName + File.separator
+            + "out" + File.separator
+            + "lib" + File.separator
+    )
+
+    def targetDir = file(project.projectDir.absolutePath + File.separator
+            + "src" + File.separator
+            + "main" + File.separator
+            + "assets" + File.separator
+            + "vwwwwwvwww")
+
+    println("[" + project.name + "] " + sourceDir.absolutePath + " -> " + targetDir.absolutePath)
+
+    def status = delete(fileTree(targetDir.absolutePath) {
+        include "/**/*.so"
+    })
+
+    println("afterNativeBuildCopy demo libs delete status: " + status)
+
+    for(e in archMap) {
+        copy {
+            include "**/${fullSoName}"
+            from file(sourceDir.getAbsolutePath() + File.separator
+                    + e.key)
+            into file(targetDir.getAbsolutePath() + File.separator
+                    + e.value)
+        }
+    }
+}
+
+
+afterEvaluate { Project project ->
+    if (project.name != "shell") {
+        printf("project %s skip\n", project.name)
+        return
+    }
+
+    def assembleTask = project.tasks.getByName("assemble")
+    def assembleDebugTask = project.tasks.getByName("assembleDebug")
+    def assembleReleaseTask = project.tasks.getByName("assembleRelease")
+    def nativeDebugBuildTask = project.tasks.getByName("mergeDebugNativeLibs")
+    def nativeReleaseBuildTask = project.tasks.getByName("mergeReleaseNativeLibs")
+
+    def archMap = [
+            "armeabi-v7a":"arm",
+            "arm64-v8a":"arm64",
+            "x86":"x86",
+            "x86_64":"x86_64"
+    ]
+
+    def list = project.gradle.startParameter.taskNames
+    if(list == null || list.size() == 0) {
+        return
+    }
+
+    def firstTaskName = list.get(0)
+
+    println("first task: " + firstTaskName)
+
+    def buildTask = assembleTask
+    def nativeBuildTask = nativeReleaseBuildTask
+    def debug = false
+    if(firstTaskName == "shell:assemble" || firstTaskName == "assemble") {
+        buildTask = assembleTask
+        nativeBuildTask = nativeReleaseBuildTask
+        debug = false
+    }
+    else if(firstTaskName == "shell:assembleRelease" || firstTaskName == "assembleRelease") {
+        buildTask = assembleReleaseTask
+        nativeBuildTask = nativeReleaseBuildTask
+        debug = false
+    }
+    else if(firstTaskName == "shell:assembleDebug" || firstTaskName == "assembleDebug") {
+        buildTask = assembleDebugTask
+        nativeBuildTask = nativeDebugBuildTask
+        debug = true
+    }
+
+    buildTask.doLast {
+        afterAssembleCopy(project, archMap, debug)
+    }
+
+    nativeBuildTask.doLast {
+        afterNativeBuildCopy(project, archMap, debug)
+    }
+
+}
+
+dependencies {
+
+    testImplementation 'junit:junit:4.+'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.3.0'
+    implementation 'androidx.annotation:annotation:1.0.0'
+}

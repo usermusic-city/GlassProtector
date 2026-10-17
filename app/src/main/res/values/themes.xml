@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 玻璃透明主题 -->
+    <style name="Theme.GlassProtector" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">@color/glass_primary</item>
+        <item name="colorPrimaryDark">@color/glass_primary_dark</item>
+        <item name="colorAccent">@color/glass_accent</item>
+        <item name="android:windowBackground">@drawable/glass_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="o_mr1">shortEdges</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:textColorPrimary">@color/glass_text_primary</item>
+        <item name="android:textColorSecondary">@color/glass_text_secondary</item>
+        <item name="android:textColorHint">@color/glass_text_hint</item>
+    </style>
+
+    <!-- 玻璃卡片样式 -->
+    <style name="GlassCard">
+        <item name="android:background">@drawable/glass_card_bg</item>
+        <item name="android:padding">16dp</item>
+        <item name="android:layout_margin">8dp</item>
+    </style>
+
+    <!-- 玻璃按钮样式 -->
+    <style name="GlassButton" parent="Widget.MaterialComponents.Button">
+        <item name="android:background">@drawable/glass_button_bg</item>
+        <item name="android:textColor">@color/glass_text_primary</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
+        <item name="android:paddingLeft">24dp</item>
+        <item name="android:paddingRight">24dp</item>
+        <item name="cornerRadius">16dp</item>
+        <item name="elevation">0dp</item>
+        <item name="strokeWidth">0dp</item>
+    </style>
+
+    <!-- TabLayout 玻璃样式 -->
+    <style name="GlassTabLayout" parent="Widget.MaterialComponents.TabLayout">
+        <item name="tabBackground">@drawable/glass_tab_selector</item>
+        <item name="tabTextColor">@color/glass_text_secondary</item>
+        <item name="tabSelectedTextColor">@color/glass_text_primary</item>
+        <item name="tabIndicatorColor">@color/glass_accent</item>
+        <item name="tabIndicatorHeight">2dp</item>
+        <item name="tabRippleColor">@color/glass_card_border</item>
+    </style>
+
+    <!-- 开关玻璃样式 -->
+    <style name="GlassSwitch" parent="Widget.MaterialComponents.CompoundButton.Switch">
+        <item name="android:textColor">@color/glass_text_primary</item>
+        <item name="buttonTint">@color/glass_primary</item>
+    </style>
+
+    <!-- 进度条玻璃样式 -->
+    <style name="GlassProgressBar" parent="Widget.AppCompat.ProgressBar.Horizontal">
+        <item name="android:progressDrawable">@drawable/glass_progress_bg</item>
+        <item name="android:minHeight">8dp</item>
+        <item name="android:maxHeight">8dp</item>
+    </style>
+
+</resources>

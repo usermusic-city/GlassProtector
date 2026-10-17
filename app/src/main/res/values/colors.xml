@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 玻璃透明主题色 -->
+    <color name="glass_primary">#667CFCFC</color>
+    <color name="glass_primary_dark">#663DD0FA</color>
+    <color name="glass_accent">#99FFFFFF</color>
+    <color name="glass_text_primary">#FFFFFFFF</color>
+    <color name="glass_text_secondary">#CCFFFFFF</color>
+    <color name="glass_text_hint">#88FFFFFF</color>
+    <color name="glass_card_bg">#33FFFFFF</color>
+    <color name="glass_card_border">#44FFFFFF</color>
+    <color name="glass_button_bg">#55FFFFFF</color>
+    <color name="glass_button_pressed">#77FFFFFF</color>
+    <color name="glass_background_start">#1A1A2E</color>
+    <color name="glass_background_mid">#16213E</color>
+    <color name="glass_background_end">#0F3460</color>
+    <color name="glass_blob1">#E94560</color>
+    <color name="glass_blob2">#533483</color>
+    <color name="glass_blob3">#0F3460</color>
+    <color name="glass_success">#4ADE80</color>
+    <color name="glass_error">#F87171</color>
+    <color name="glass_warning">#FBBF24</color>
+    <color name="glass_info">#60A5FA</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="transparent">#00000000</color>
+</resources>

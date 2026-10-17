@@ -1,0 +1,215 @@
+package com.luoye.dpt;
+
+import com.android.dx.command.dexer.Main;
+import com.luoye.dpt.builder.Aab;
+import com.luoye.dpt.builder.AndroidPackage;
+import com.luoye.dpt.builder.Apk;
+import com.luoye.dpt.config.Const;
+import com.luoye.dpt.util.*;
+
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.jar.Manifest;
+
+public class Dpt {
+
+    private static final String MANIFEST_BUILD_KEY_ATTR = "Dpt-Build-Key";
+
+    public static void main(String[] args) {
+        try {
+            AndroidPackage androidPackage = parseOptions(args);
+            if(androidPackage == null) {
+                return;
+            }
+            androidPackage.protect();
+        } catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    private static void usage(Options options, String msg) {
+        System.err.println("Error: " + msg);
+        HelpFormatter helpFormatter = new HelpFormatter();
+        helpFormatter.printHelp("java -jar dpt.jar [option] -f <package_file>",options);
+    }
+
+    private static void printVersion() {
+        System.out.println(getVersion());
+    }
+
+    public static String getVersion() {
+        Package pkg = Dpt.class.getPackage();
+        String version = (pkg != null) ? pkg.getImplementationVersion() : null;
+        if (version == null) {
+            version = "unknown";
+        }
+        return version;
+    }
+
+    public static String getBuildKey() {
+        // Prefer the key written next to shell SO artifacts so encrypt side
+        // always matches the native binary being packaged.
+        String executablePath = FileUtils.getExecutablePath();
+        if (executablePath != null && !executablePath.isEmpty()) {
+            File keyFile = new File(executablePath,
+                    "shell-files" + File.separator + Const.KEY_BUILD_KEY_FILE_NAME);
+            if (keyFile.isFile()) {
+                try {
+                    String value = Files.readString(keyFile.toPath(), StandardCharsets.UTF_8).trim();
+                    if (!value.isEmpty()) {
+                        return value;
+                    }
+                } catch (IOException ignored) {
+                    // fall through to jar manifest
+                }
+            }
+        }
+
+        try {
+            ClassLoader classLoader = Dpt.class.getClassLoader();
+            if (classLoader == null) {
+                return null;
+            }
+            Enumeration<URL> resources = classLoader.getResources("META-INF/MANIFEST.MF");
+            while (resources.hasMoreElements()) {
+                try (InputStream is = resources.nextElement().openStream()) {
+                    String value = new Manifest(is).getMainAttributes().getValue(MANIFEST_BUILD_KEY_ATTR);
+                    if (value != null && !value.isEmpty()) {
+                        return value;
+                    }
+                }
+            }
+        } catch (IOException ignored) {
+            // fall through
+        }
+        return null;
+    }
+
+    private static AndroidPackage parseOptions(String[] args) {
+        Options options = new Options();
+        options.addOption(new Option(Const.OPTION_VERSION, Const.OPTION_VERSION_LONG, false, "Show program's version number."));
+        options.addOption(new Option(Const.OPTION_NO_SIGN_PACKAGE, Const.OPTION_NO_SIGN_PACKAGE_LONG, false, "Do not sign package."));
+        options.addOption(new Option(null, Const.OPTION_DUMP_CODE_LONG, false, "Dump the code item of DEX and save it to .json files."));
+        options.addOption(new Option(null, Const.OPTION_OPEN_NOISY_LOG_LONG, false, "Open noisy log."));
+        options.addOption(new Option(Const.OPTION_INPUT_FILE, Const.OPTION_INPUT_FILE_LONG, true, "Need to protect android package(*.apk, *.aab) file."));
+        options.addOption(new Option(null, Const.OPTION_DEBUGGABLE_LONG, false, "Make package debuggable."));
+        options.addOption(new Option(null, Const.OPTION_DISABLE_APP_COMPONENT_FACTORY_LONG, false, "Disable app component factory(just use for debug)."));
+        options.addOption(new Option(Const.OPTION_OUTPUT_PATH, Const.OPTION_OUTPUT_PATH_LONG, true, "Output directory for protected package."));
+        options.addOption(new Option(Const.OPTION_DO_NOT_PROTECT_CLASSES_RULES, Const.OPTION_DO_NOT_PROTECT_CLASSES_RULES_LONG, true, "Rules file for class names that will not be protected.\n"));
+        options.addOption(new Option(Const.OPTION_KEEP_CLASSES, Const.OPTION_KEEP_CLASSES_LONG, false, "Keeping some classes in the package can improve the app's startup speed to a certain extent, but it is not supported by some application packages.\n"));
+        options.addOption(new Option(Const.OPTION_SMALLER, Const.OPTION_SMALLER_LONG, false, "Trade some of the app's performance for a smaller app size.\n"));
+        options.addOption(new Option(Const.OPTION_PROTECT_CONFIG, Const.OPTION_PROTECT_CONFIG_LONG, true, "Protect config file.\n"));
+        options.addOption(new Option(Const.OPTION_EXCLUDE_ABI, Const.OPTION_EXCLUDE_ABI_LONG, true, "Exclude specific ABIs (comma separated, e.g. x86,x86_64). \n"
+                + "Supported ABIs:\n"
+                + "- arm       (armeabi-v7a)\n"
+                + "- arm64     (arm64-v8a)\n"
+                + "- x86\n"
+                + "- x86_64"));
+        options.addOption(new Option(Const.OPTION_VERIFY_SIGN, Const.OPTION_VERIFY_SIGN_LONG, false, "Enable runtime app signature verification. The certificate SHA-256 is computed automatically from the signing keystore.\n"));
+        options.addOption(new Option(null, Const.OPTION_DISABLE_FRIDA_DETECT_LONG, false, "Disable runtime Frida detection.\n"));
+        options.addOption(new Option(null, Const.OPTION_DISABLE_CRC_DETECT_LONG, false, "Disable runtime libc .text CRC detection.\n"));
+        options.addOption(new Option(null, Const.OPTION_DISABLE_ANTI_DEBUG_LONG, false, "Disable runtime anti-debug.\n"));
+
+        CommandLineParser commandLineParser = new DefaultParser();
+        try {
+            CommandLine commandLine = commandLineParser.parse(options, args);
+
+            if(commandLine.hasOption(Const.OPTION_VERSION)) {
+                printVersion();
+                return null;
+            }
+
+            if(!commandLine.hasOption(Const.OPTION_INPUT_FILE)) {
+                usage(options,"Need a file path.");
+                return null;
+            }
+
+            LogUtils.setOpenNoisyLog(commandLine.hasOption(Const.OPTION_OPEN_NOISY_LOG_LONG));
+
+
+            List<String> excludedAbi = new ArrayList<>();
+            if (commandLine.hasOption(Const.OPTION_EXCLUDE_ABI)) {
+                String excludeAbiStr = commandLine.getOptionValue(Const.OPTION_EXCLUDE_ABI);
+                if (excludeAbiStr != null && !excludeAbiStr.isEmpty()) {
+                    String[] abiArray = excludeAbiStr.split(",");
+                    for (String abi : abiArray) {
+                        excludedAbi.add(abi.trim());
+                    }
+                }
+            }
+
+            String filePath = commandLine.getOptionValue(Const.OPTION_INPUT_FILE);
+
+            int riskCheckFlags = 0;
+            if (commandLine.hasOption(Const.OPTION_DISABLE_FRIDA_DETECT_LONG)) {
+                riskCheckFlags |= Const.FLAG_DISABLE_FRIDA_DETECT;
+            }
+            if (commandLine.hasOption(Const.OPTION_DISABLE_CRC_DETECT_LONG)) {
+                riskCheckFlags |= Const.FLAG_DISABLE_CRC_DETECT;
+            }
+            if (commandLine.hasOption(Const.OPTION_DISABLE_ANTI_DEBUG_LONG)) {
+                riskCheckFlags |= Const.FLAG_DISABLE_ANTI_DEBUG;
+            }
+
+            if(filePath.endsWith(".apk")) {
+                return new Apk.Builder()
+                        .filePath(filePath)
+                        .outputPath(commandLine.getOptionValue(Const.OPTION_OUTPUT_PATH))
+                        .sign(!commandLine.hasOption(Const.OPTION_NO_SIGN_PACKAGE))
+                        .debuggable(commandLine.hasOption(Const.OPTION_DEBUGGABLE_LONG))
+                        .appComponentFactory(!commandLine.hasOption(Const.OPTION_DISABLE_APP_COMPONENT_FACTORY_LONG))
+                        .dumpCode(commandLine.hasOption(Const.OPTION_DUMP_CODE_LONG))
+                        .excludedAbi(excludedAbi)
+                        .rulesFile(commandLine.getOptionValue(Const.OPTION_DO_NOT_PROTECT_CLASSES_RULES))
+                        .keepClasses(commandLine.hasOption(Const.OPTION_KEEP_CLASSES))
+                        .smaller(commandLine.hasOption(Const.OPTION_SMALLER))
+                        .protectConfigFile(commandLine.getOptionValue(Const.OPTION_PROTECT_CONFIG))
+                        .verifySign(commandLine.hasOption(Const.OPTION_VERIFY_SIGN))
+                        .riskCheckFlags(riskCheckFlags)
+                        .build();
+            }
+            else if(filePath.endsWith(".aab")) {
+                return new Aab.Builder()
+                        .filePath(filePath)
+                        .outputPath(commandLine.getOptionValue(Const.OPTION_OUTPUT_PATH))
+                        .sign(!commandLine.hasOption(Const.OPTION_NO_SIGN_PACKAGE))
+                        .debuggable(commandLine.hasOption(Const.OPTION_DEBUGGABLE_LONG))
+                        .appComponentFactory(!commandLine.hasOption(Const.OPTION_DISABLE_APP_COMPONENT_FACTORY_LONG))
+                        .dumpCode(commandLine.hasOption(Const.OPTION_DUMP_CODE_LONG))
+                        .excludedAbi(excludedAbi)
+                        .rulesFile(commandLine.getOptionValue(Const.OPTION_DO_NOT_PROTECT_CLASSES_RULES))
+                        .keepClasses(commandLine.hasOption(Const.OPTION_KEEP_CLASSES))
+                        .smaller(commandLine.hasOption(Const.OPTION_SMALLER))
+                        .protectConfigFile(commandLine.getOptionValue(Const.OPTION_PROTECT_CONFIG))
+                        .verifySign(commandLine.hasOption(Const.OPTION_VERIFY_SIGN))
+                        .riskCheckFlags(riskCheckFlags)
+                        .build();
+            }
+            else {
+                usage(options, "Unsupported file type!");
+            }
+
+        }
+        catch (ParseException e) {
+            usage(options, e.toString());
+        }
+
+        return null;
+    }
+
+}

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 深色渐变背景 -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="135"
+                android:startColor="@color/glass_background_start"
+                android:centerColor="@color/glass_background_mid"
+                android:endColor="@color/glass_background_end"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- 光斑1 - 右上 -->
+    <item android:top="-100dp" android:right="-80dp">
+        <shape android:shape="oval">
+            <solid android:color="#33E94560" />
+            <size android:width="300dp" android:height="300dp" />
+        </shape>
+    </item>
+    <!-- 光斑2 - 左下 -->
+    <item android:bottom="-120dp" android:left="-60dp">
+        <shape android:shape="oval">
+            <solid android:color="#33533483" />
+            <size android:width="280dp" android:height="280dp" />
+        </shape>
+    </item>
+    <!-- 光斑3 - 中间 -->
+    <item android:top="200dp" android:left="100dp">
+        <shape android:shape="oval">
+            <solid android:color="#223DD0FA" />
+            <size android:width="200dp" android:height="200dp" />
+        </shape>
+    </item>
+</layer-list>

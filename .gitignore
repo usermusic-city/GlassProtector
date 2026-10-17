@@ -1,0 +1,24 @@
+# Gradle
+.gradle/
+build/
+app/build/
+dpt-core/build/
+dpt-shell/build/
+dpt-shell/dpt/build/
+dpt-shell/shell/build/
+
+# Local config
+local.properties
+
+# IDE
+.idea/
+*.iml
+.cxx/
+captures/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 附件文档（非源码）
+源码数据整合文件.txt
