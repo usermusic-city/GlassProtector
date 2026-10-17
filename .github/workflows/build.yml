@@ -52,15 +52,24 @@ jobs:
           ./gradlew shell:assembleRelease --no-daemon
           ls -la executable/
 
-      - name: Convert dpt.jar to DEX
+      # Android 8.0+ 禁止 DexClassLoader 加载 app 可写目录（files/cache）里的 dex。
+      # 业界标准解法（Tinker 同款）：dex 伪装成 .so 打进 jniLibs，
+      # 安装时由系统解压到 nativeLibraryDir（app 只读），从那里加载即合规。
+      - name: Convert dpt.jar to DEX (fake .so for nativeLibraryDir)
         run: |
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "using build-tools: $BT"
-          mkdir -p app/src/main/assets/dpt_engine/dex
+          rm -rf app/src/main/jniLibs/arm64-v8a /tmp/dptdex
+          mkdir -p app/src/main/jniLibs/arm64-v8a /tmp/dptdex
           "$BT/d8" --release --min-api 24 \
-            --output app/src/main/assets/dpt_engine/dex \
+            --output /tmp/dptdex \
             dpt-shell/executable/dpt.jar
-          ls -la app/src/main/assets/dpt_engine/dex/
+          i=1
+          for f in /tmp/dptdex/classes*.dex; do
+            cp "$f" "app/src/main/jniLibs/arm64-v8a/libdptcore${i}.so"
+            i=$((i+1))
+          done
+          ls -la app/src/main/jniLibs/arm64-v8a/
 
       - name: Copy shell-files into assets
         run: |

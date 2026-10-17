@@ -14,6 +14,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import dalvik.system.DexClassLoader;
@@ -72,17 +73,13 @@ public class DptProtector {
         String workDir = outDir + "/dpt_work_" + System.currentTimeMillis();
         ApkUtils.ensureDir(workDir);
 
-        // 1. 释放 dpt engine（dex + shell-files + keystore）
+        // 1. 释放 dpt engine 运行资源（shell-files + keystore；引擎 dex 不走 assets）
         log("[1/6] 释放 DPT 引擎运行时 ...");
         File engineDir = new File(appContext.getFilesDir(), "dpt_engine");
         deleteRecursive(engineDir);
         ApkUtils.ensureDir(engineDir.getAbsolutePath());
         extractAssets(ASSET_ROOT, engineDir);
-        File dexDir = new File(engineDir, "dex");
         File shellFiles = new File(engineDir, "shell-files");
-        if (!dexDir.isDirectory() || listFilesRecursive(dexDir, ".dex").isEmpty()) {
-            throw new Exception("DPT 引擎 dex 缺失（assets/" + ASSET_ROOT + "/dex），请使用 CI 构建的完整版本");
-        }
         if (!new File(shellFiles, "dex").isDirectory()) {
             throw new Exception("shell-files 缺失（assets/" + ASSET_ROOT + "/shell-files），请使用 CI 构建的完整版本");
         }
@@ -91,13 +88,25 @@ public class DptProtector {
         // 2. Android 环境注入：tmpdir（Const.ROOT_OF_OUT_DIR 静态读取）
         System.setProperty("java.io.tmpdir", workDir);
 
-        // 3. 加载 dpt dex
+        // 3. 加载 dpt processor。
+        //    引擎 dex 以 libdptcore*.so（伪装 .so）形式打进 jniLibs，安装时由系统
+        //    解压到 nativeLibraryDir（app 只读），规避 Android 8.0+ 的
+        //    "Writable dex file not allowed" 限制（files/cache 目录禁止加载 dex）。
         log("[2/6] 加载 DPT processor ...");
+        String nativeDir = appContext.getApplicationInfo().nativeLibraryDir;
+        File[] soDexes = new File(nativeDir).listFiles(
+                (dir, name) -> name.startsWith("libdptcore") && name.endsWith(".so"));
+        if (soDexes == null || soDexes.length == 0) {
+            throw new Exception("DPT 引擎 dex 未安装到 nativeLibraryDir（" + nativeDir
+                    + "），请卸载后重新安装 CI 构建的完整版本");
+        }
+        Arrays.sort(soDexes);
         StringBuilder dexPaths = new StringBuilder();
-        for (File f : listFilesRecursive(dexDir, ".dex")) {
+        for (File f : soDexes) {
             if (dexPaths.length() > 0) dexPaths.append(File.pathSeparatorChar);
             dexPaths.append(f.getAbsolutePath());
         }
+        log("  引擎 dex: " + dexPaths);
         File odexDir = new File(appContext.getCacheDir(), "dpt_odex");
         ApkUtils.ensureDir(odexDir.getAbsolutePath());
         ClassLoader parent = DptProtector.class.getClassLoader();
