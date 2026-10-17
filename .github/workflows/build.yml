@@ -73,6 +73,7 @@ jobs:
 
       - name: Copy shell-files into assets
         run: |
+          mkdir -p app/src/main/assets/dpt_engine
           rm -rf app/src/main/assets/dpt_engine/shell-files
           cp -r dpt-shell/executable/shell-files app/src/main/assets/dpt_engine/
           find app/src/main/assets/dpt_engine/shell-files -type f -printf "%p %s bytes\n"
