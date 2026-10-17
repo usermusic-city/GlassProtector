@@ -13,6 +13,7 @@ import org.json.JSONObject;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -26,8 +27,12 @@ import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -289,7 +294,7 @@ public class GlassProtectorEngine {
         log("反调试: " + (config.isGlassAntiDebug() ? "开启" : "关闭")
                 + "，签名校验: " + (config.isGlassSignVerify() ? "开启" : "关闭")
                 + "，字符串加密(资产名随机化): " + (config.isGlassStringEncrypt() ? "开启" : "关闭"));
-        log("资源混淆(元数据清零): " + (config.isResourceObfuscate() ? "开启" : "关闭")
+        log("资源混淆(路径+arsc+元数据): " + (config.isResourceObfuscate() ? "开启" : "关闭")
                 + "，垃圾代码(junk dex): " + (config.isGlassJunkCode() ? "开启" : "关闭")
                 + "，Dex2C(native容器): " + (config.isDex2cEnabled() ? "开启" : "关闭"));
         log("assets加密(二次AES+诱饵): " + (config.isAssetsEncryptEnabled() ? "开启" : "关闭")
@@ -354,6 +359,26 @@ public class GlassProtectorEngine {
         try (ZipFile zip = new ZipFile(input);
              ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
 
+            // ---- res 资源混淆：arsc 字符串池（路径/type名/entry名）+ manifest 同步 + 条目改名映射 ----
+            byte[] manifestOut = newManifest;
+            byte[] arscOut = null;
+            Map<String, String> resPathMap = null;
+            if (scrubMeta) {
+                Set<String> allNames = new HashSet<>();
+                Enumeration<? extends ZipEntry> it0 = zip.entries();
+                while (it0.hasMoreElements()) allNames.add(it0.nextElement().getName());
+                byte[] arsc = readZipBytes(zip, "resources.arsc");
+                if (arsc != null) {
+                    ArscObfuscator.Result r = ArscObfuscator.obfuscate(arsc, manifestOut, allNames);
+                    arscOut = r.arsc;
+                    manifestOut = r.manifest;
+                    resPathMap = r.pathMap;
+                    log("  资源混淆: " + r.obfPaths + " 个资源路径已随机化，"
+                            + r.obfTypeNames + " 个 type 名 / " + r.obfKeyNames
+                            + " 个 entry 名已混淆（arsc 等长原地替换）");
+                }
+            }
+
             int scrubbed = 0;
             Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
@@ -368,7 +393,25 @@ public class GlassProtectorEngine {
                 if (name.equals("lib/arm64-v8a/" + ELF_SO_NAME)
                         || name.equals("lib/armeabi-v7a/" + ELF_SO_NAME)) continue;      // 清旧 ELF 容器
 
-                copyEntry(zip, zos, e, scrubMeta);
+                if (name.equals("resources.arsc")) {
+                    // arsc：混淆后内容已变，必须重算 CRC（putEntry 内置）；保持 STORED
+                    if (arscOut != null) {
+                        putEntry(zos, name, arscOut, ZipEntry.STORED,
+                                scrubMeta ? META_SCRUB_TIME : System.currentTimeMillis());
+                    } else {
+                        copyEntry(zip, zos, e, scrubMeta, null);
+                        if (scrubMeta) scrubbed++;
+                    }
+                    continue;
+                }
+                if (resPathMap != null && resPathMap.containsKey(name)) {
+                    // res 资源文件：按 arsc 同一映射改名（内容不变，CRC 不变）
+                    copyEntry(zip, zos, e, scrubMeta, resPathMap.get(name));
+                    if (scrubMeta) scrubbed++;
+                    continue;
+                }
+
+                copyEntry(zip, zos, e, scrubMeta, null);
                 if (scrubMeta) scrubbed++;
             }
             if (scrubMeta) {
@@ -377,7 +420,7 @@ public class GlassProtectorEngine {
 
             long ts = scrubMeta ? META_SCRUB_TIME : System.currentTimeMillis();
             // 新 manifest
-            putEntry(zos, "AndroidManifest.xml", newManifest, ZipEntry.DEFLATED, ts);
+            putEntry(zos, "AndroidManifest.xml", manifestOut, ZipEntry.DEFLATED, ts);
             // 壳 DEX 作为主 DEX
             putEntry(zos, "classes.dex", readFile(shellDex), ZipEntry.DEFLATED, ts);
             // 配置
@@ -415,9 +458,9 @@ public class GlassProtectorEngine {
         }
     }
 
-    private static void copyEntry(ZipFile zip, ZipOutputStream zos, ZipEntry e, boolean scrub)
-            throws Exception {
-        ZipEntry out = new ZipEntry(e.getName());
+    private static void copyEntry(ZipFile zip, ZipOutputStream zos, ZipEntry e, boolean scrub,
+                                  String overrideName) throws Exception {
+        ZipEntry out = new ZipEntry(overrideName != null ? overrideName : e.getName());
         // 资源混淆：时间戳统一清零；new ZipEntry 不复制 extra，天然剥离
         out.setTime(scrub ? META_SCRUB_TIME : e.getTime());
         if (e.getMethod() == ZipEntry.STORED) {
@@ -432,6 +475,17 @@ public class GlassProtectorEngine {
             transfer(in, zos);
         }
         zos.closeEntry();
+    }
+
+    /** 读取 zip 内指定条目的全部字节；条目不存在返回 null */
+    private static byte[] readZipBytes(ZipFile zip, String name) throws Exception {
+        ZipEntry e = zip.getEntry(name);
+        if (e == null) return null;
+        ByteArrayOutputStream bos = new ByteArrayOutputStream((int) e.getSize());
+        try (InputStream in = zip.getInputStream(e)) {
+            transfer(in, bos);
+        }
+        return bos.toByteArray();
     }
 
     private static void putEntry(ZipOutputStream zos, String name, byte[] data, int method, long ts)
