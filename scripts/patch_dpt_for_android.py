@@ -188,6 +188,46 @@ def main(dpt_root):
             '                        java.util.Arrays.asList("Ljava/lang/Object;", OBJECT_ARRAY),'
         ),
     ])
+    # 6. ShellConfig / SignatureConfig 的 toString() 是递归炸弹：
+    #    toString -> JSON.toJSONString(this) -> 序列化时任一 getter 抛异常
+    #    -> fastjson2 toJSONString 的 catch 块构造错误消息时 String.valueOf(object)
+    #    -> 又调 toString -> 无限递归 -> StackOverflowError。
+    #    SOE 是 Error，穿透 Dpt.main 的 catch(Exception)，在 Android/ART 上
+    #    深递归直接 SIGSEGV 杀死宿主进程（加固"加着加着退回"的真实根因之一）。
+    #    修复：主类 toString 改用手写的 toJson()（逐字段、无递归、天然不含签名密码）；
+    #    嵌套 SignatureConfig.toString 改为手写脱敏串（防递归 + 防密码泄漏进日志）。
+    shell_config = dpt_root + '/dpt/src/main/java/com/luoye/dpt/config/ShellConfig.java'
+    patch_file(shell_config, [
+        (
+            '        @Override\n'
+            '        public String toString() {\n'
+            '            return JSON.toJSONString(this);\n'
+            '        }',
+            '        @Override\n'
+            '        public String toString() {\n'
+            '            // Never JSON.toJSONString(this): fastjson2 catch-block calls\n'
+            '            // String.valueOf(object) on serialization failure, recursing\n'
+            '            // into toString -> StackOverflowError. Also keep passwords\n'
+            '            // out of logs.\n'
+            '            return "SignatureConfig{keystore=" + keystore + ", alias=" + alias\n'
+            '                    + ", storepass=***, keypass=***}";\n'
+            '        }'
+        ),
+        (
+            '    @Override\n'
+            '    public String toString() {\n'
+            '        return JSON.toJSONString(this);\n'
+            '    }',
+            '    @Override\n'
+            '    public String toString() {\n'
+            '        // fastjson2 toJSONString catch-block calls String.valueOf(object)\n'
+            '        // on serialization failure -> toString -> toJSONString -> infinite\n'
+            '        // recursion -> StackOverflowError (kills host process on ART).\n'
+            '        // toJson() is a hand-written field-by-field serializer.\n'
+            '        return toJson();\n'
+            '    }'
+        ),
+    ])
     print("ALL DPT PATCHES APPLIED")
 
 
