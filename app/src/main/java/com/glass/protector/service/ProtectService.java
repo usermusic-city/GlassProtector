@@ -76,9 +76,11 @@ public class ProtectService extends Service {
             ProtectState.elapsedMs = SystemClock.elapsedRealtime() - start;
             ProtectState.finishSuccess(output);
             updateNotification("加固完成");
-        } catch (Exception e) {
+        } catch (Throwable t) {
+            // 必须接 Throwable：OutOfMemoryError 等 Error 不是 Exception，
+            // 漏接会导致加固线程崩溃直接杀死进程（表现为加固中闪退）
             ProtectState.elapsedMs = SystemClock.elapsedRealtime() - start;
-            ProtectState.finishFailure(e);
+            ProtectState.finishFailure(t);
             updateNotification("加固失败: " + ProtectState.errorMsg);
         } finally {
             isRunning = false;

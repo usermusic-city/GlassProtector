@@ -22,6 +22,7 @@ import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.MessageDigest;
+import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Enumeration;
@@ -36,6 +37,8 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import pxb.android.axml.AxmlParser;
+
+import com.android.apksig.ApkSigner;
 
 /**
  * Glass 自研加固引擎 —— 真实现。
@@ -116,7 +119,7 @@ public class GlassProtectorEngine {
         }
         log("  原 Application: " + (origApp == null ? "(无，使用默认)" : origApp));
 
-        // 2. 生成 AES 密钥并加密全部 DEX
+        // 2. 生成 AES 密钥并加密全部 DEX（流式落盘，不整块进内存）
         log("[2/7] AES 加密 DEX ...");
         byte[] aesKey = new byte[16];
         new SecureRandom().nextBytes(aesKey);
@@ -124,14 +127,16 @@ public class GlassProtectorEngine {
         if (dexNames.isEmpty()) {
             throw new Exception("原 APK 中没有找到 DEX 文件");
         }
-        List<byte[]> encDexes = new ArrayList<>();
+        List<EncDex> encDexes = new ArrayList<>();
         long totalDexBytes = 0;
-        for (String dexName : dexNames) {
-            byte[] dex = readZipEntry(input, dexName);
-            totalDexBytes += dex.length;
-            encDexes.add(aesEncrypt(aesKey, dex));
+        for (int i = 0; i < dexNames.size(); i++) {
+            File encFile = new File(workDir, String.format(Locale.US, DEX_ASSET_FORMAT, i));
+            EncDex info = encryptDexToFile(input, dexNames.get(i), aesKey, encFile);
+            encDexes.add(info);
+            totalDexBytes += info.origSize;
+            log("  " + dexNames.get(i) + " (" + (info.origSize / 1024) + " KB) 已加密");
         }
-        log("  加密 " + encDexes.size() + " 个 DEX，共 " + (totalDexBytes / 1024) + " KB");
+        log("  共加密 " + encDexes.size() + " 个 DEX，合计 " + (totalDexBytes / 1024) + " KB");
 
         // 3. 生成壳配置
         log("[3/7] 生成壳配置 ...");
@@ -227,7 +232,7 @@ public class GlassProtectorEngine {
      * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX 与加密 DEX。
      */
     private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
-                            byte[] configBlob, List<byte[]> encDexes) throws Exception {
+                            byte[] configBlob, List<EncDex> encDexes) throws Exception {
         try (ZipFile zip = new ZipFile(input);
              ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
 
@@ -250,10 +255,11 @@ public class GlassProtectorEngine {
             putEntry(zos, "classes.dex", readFile(shellDex), ZipEntry.DEFLATED);
             // 配置
             putEntry(zos, "assets/" + CONFIG_ASSET, configBlob, ZipEntry.DEFLATED);
-            // 加密 DEX
+            // 加密 DEX（从落盘文件流式写入；密文不可压缩，用 STORED 免去无谓 CPU）
             for (int i = 0; i < encDexes.size(); i++) {
-                putEntry(zos, String.format(Locale.US, "assets/" + DEX_ASSET_FORMAT, i),
-                        encDexes.get(i), ZipEntry.DEFLATED);
+                EncDex d = encDexes.get(i);
+                putFileEntry(zos, String.format(Locale.US, "assets/" + DEX_ASSET_FORMAT, i),
+                        d.file, d.size, d.crc);
             }
         }
     }
@@ -289,22 +295,90 @@ public class GlassProtectorEngine {
         zos.closeEntry();
     }
 
+    /** 从文件流式写入 STORED entry（size/crc 需预知，由加密落盘时记录） */
+    private static void putFileEntry(ZipOutputStream zos, String name, File f, long size, long crc)
+            throws Exception {
+        ZipEntry e = new ZipEntry(name);
+        e.setTime(System.currentTimeMillis());
+        e.setMethod(ZipEntry.STORED);
+        e.setSize(size);
+        e.setCompressedSize(size);
+        e.setCrc(crc);
+        zos.putNextEntry(e);
+        try (InputStream in = new BufferedInputStream(new FileInputStream(f))) {
+            transfer(in, zos);
+        }
+        zos.closeEntry();
+    }
+
+    /** 加密 DEX 的落盘产物（size/crc 为密文属性，供 STORED 写入 zip） */
+    private static final class EncDex {
+        final File file;
+        final long size;
+        final long crc;
+        final long origSize;
+
+        EncDex(File file, long size, long crc, long origSize) {
+            this.file = file;
+            this.size = size;
+            this.crc = crc;
+            this.origSize = origSize;
+        }
+    }
+
+    /**
+     * 流式加密单个 DEX：ZIP 条目流 → CipherOutputStream(AES-CBC) → 落盘文件，
+     * 同时用 CheckedOutputStream 记录密文 CRC32。全程 O(64KB) 内存，
+     * 修复加固大 APK 时全量 byte[] 堆积导致的 OutOfMemoryError 闪退。
+     */
+    private static EncDex encryptDexToFile(File apk, String dexName, byte[] key, File out)
+            throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(key));
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        long origSize;
+        try (ZipFile zip = new ZipFile(apk)) {
+            ZipEntry e = zip.getEntry(dexName);
+            if (e == null) {
+                throw new Exception("APK 中缺少条目 " + dexName);
+            }
+            origSize = e.getSize();
+            try (InputStream in = new BufferedInputStream(zip.getInputStream(e));
+                 java.util.zip.CheckedOutputStream cos = new java.util.zip.CheckedOutputStream(
+                         new BufferedOutputStream(new FileOutputStream(out)), crc);
+                 javax.crypto.CipherOutputStream cios = new javax.crypto.CipherOutputStream(cos, cipher)) {
+                transfer(in, cios);
+            } // cios 先关：flush padding，级联关闭 cos 与文件流
+        }
+        return new EncDex(out, out.length(), crc.getValue(), origSize);
+    }
+
     // ---------------- 签名 ----------------
 
     private void signApk(File in, File keyStore, File out) throws Exception {
-        // apksigner 的 main 会把结果打在 stdout；错误会抛异常
-        com.android.apksigner.ApkSignerTool.main(new String[]{
-                "sign",
-                "--ks", keyStore.getAbsolutePath(),
-                "--ks-pass", "pass:" + KEYSTORE_PASSWORD,
-                "--key-pass", "pass:" + KEYSTORE_PASSWORD,
-                "--ks-key-alias", KEYSTORE_ALIAS,
-                "--v1-signing-enabled", "true",
-                "--v2-signing-enabled", "true",
-                "--v3-signing-enabled", "false",
-                "--out", out.getAbsolutePath(),
-                in.getAbsolutePath()
-        });
+        // 从 PKCS12 提取私钥与证书
+        KeyStore ks = KeyStore.getInstance("PKCS12");
+        try (InputStream kin = new FileInputStream(keyStore)) {
+            ks.load(kin, KEYSTORE_PASSWORD.toCharArray());
+        }
+        PrivateKey key = (PrivateKey) ks.getKey(KEYSTORE_ALIAS, KEYSTORE_PASSWORD.toCharArray());
+        java.security.cert.X509Certificate cert =
+                (java.security.cert.X509Certificate) ks.getCertificate(KEYSTORE_ALIAS);
+        if (key == null || cert == null) {
+            throw new Exception("keystore 中没有别名 " + KEYSTORE_ALIAS + " 的签名密钥");
+        }
+        ApkSigner.SignerConfig signerConfig = new ApkSigner.SignerConfig.Builder(
+                KEYSTORE_ALIAS, key, java.util.Collections.singletonList(cert)).build();
+        // 直接走 apksig 库 API。不能调 ApkSignerTool.main()：CLI 失败路径会 System.exit
+        // 直接杀死本加固进程（表现为加固过程中闪退、无失败提示）。
+        ApkSigner signer = new ApkSigner.Builder(java.util.Collections.singletonList(signerConfig))
+                .setInputApk(in)
+                .setOutputApk(out)
+                .setV1SigningEnabled(true)
+                .setV2SigningEnabled(true)
+                .setV3SigningEnabled(false)
+                .build();
+        signer.sign();
         if (!out.isFile() || out.length() == 0) {
             throw new Exception("签名失败：输出 APK 不存在");
         }
