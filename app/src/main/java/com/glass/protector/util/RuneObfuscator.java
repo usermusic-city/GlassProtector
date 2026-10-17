@@ -98,7 +98,7 @@ public class RuneObfuscator {
         int dexCount = 0;
         Set<String> components = new LinkedHashSet<>();
         try (ZipFile zip = new ZipFile(apk)) {
-            List<? extends ZipEntry> dexList = new ArrayList<>();
+            List<ZipEntry> dexList = new ArrayList<>();
             java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry e = entries.nextElement();
@@ -281,8 +281,9 @@ public class RuneObfuscator {
                 if (tag == null || !tags.contains(tag)) continue;
                 for (int i = 0; i < parser.getAttrCount(); i++) {
                     if ("name".equals(parser.getAttrName(i))) {
-                        String v = parser.getAttrValue(i);
-                        if (v != null && !v.isEmpty()) out.add(v);
+                        Object v = parser.getAttrValue(i);
+                        String s = v == null ? null : String.valueOf(v);
+                        if (s != null && !s.isEmpty()) out.add(s);
                     }
                 }
             }
