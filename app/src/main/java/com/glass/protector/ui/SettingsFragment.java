@@ -19,6 +19,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.Fragment;
 
 import com.glass.protector.R;
@@ -27,6 +28,9 @@ import com.google.android.material.switchmaterial.SwitchMaterial;
 import com.google.android.material.textfield.TextInputEditText;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 
 public class SettingsFragment extends Fragment {
 
@@ -40,9 +44,9 @@ public class SettingsFragment extends Fragment {
     private static final String KEY_SHOW_LOG = "show_log";
 
     private LinearLayout keystoreInfoLayout;
-    private TextView keystoreFileName, keystoreAliasText, outputDirText;
+    private TextView keystoreFileName, keystoreAliasText, outputDirText, cacheSizeText;
     private TextInputEditText keystorePassEdit, keystoreAliasEdit;
-    private Button importKeystoreBtn, resetOutputDirBtn, chooseOutputDirBtn;
+    private Button importKeystoreBtn, resetOutputDirBtn, chooseOutputDirBtn, cleanCacheBtn;
     private SwitchMaterial autoSignSwitch, keepOriginalSwitch, showLogSwitch;
 
     private SharedPreferences prefs;
@@ -101,6 +105,8 @@ public class SettingsFragment extends Fragment {
         importKeystoreBtn = view.findViewById(R.id.importKeystoreBtn);
         resetOutputDirBtn = view.findViewById(R.id.resetOutputDirBtn);
         chooseOutputDirBtn = view.findViewById(R.id.chooseOutputDirBtn);
+        cleanCacheBtn = view.findViewById(R.id.cleanCacheBtn);
+        cacheSizeText = view.findViewById(R.id.cacheSizeText);
         autoSignSwitch = view.findViewById(R.id.autoSignSwitch);
         keepOriginalSwitch = view.findViewById(R.id.keepOriginalSwitch);
         showLogSwitch = view.findViewById(R.id.showLogSwitch);
@@ -124,6 +130,9 @@ public class SettingsFragment extends Fragment {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             dirPicker.launch(intent);
         });
+
+        // 清理缓存：输入 APK 副本 + 加固中间文件 + 历史产物
+        cleanCacheBtn.setOnClickListener(v -> confirmCleanCache());
 
         // 保存密码和别名
         keystorePassEdit.setOnFocusChangeListener((v, hasFocus) -> {
@@ -160,6 +169,120 @@ public class SettingsFragment extends Fragment {
         autoSignSwitch.setChecked(prefs.getBoolean(KEY_AUTO_SIGN, true));
         keepOriginalSwitch.setChecked(prefs.getBoolean(KEY_KEEP_ORIGINAL, true));
         showLogSwitch.setChecked(prefs.getBoolean(KEY_SHOW_LOG, false));
+        updateCacheInfo();
+    }
+
+    // ==================== 缓存清理 ====================
+
+    /** 刷新可清理缓存统计 */
+    private void updateCacheInfo() {
+        List<File> targets = new ArrayList<>();
+        collectCacheTargets(targets);
+        long bytes = 0;
+        int files = 0;
+        for (File f : targets) {
+            bytes += dirSize(f);
+            files += countFiles(f);
+        }
+        cacheSizeText.setText(files == 0
+                ? "暂无可清理缓存"
+                : "可清理: " + files + " 个文件 / " + fmtSize(bytes));
+    }
+
+    /** 收集清理目标：cache 输入副本 + glass_work_* 中间目录 + *_glass_protected.apk 历史产物 */
+    private void collectCacheTargets(List<File> targets) {
+        Context ctx = requireContext();
+        // 1. 本 APP cache 目录（文件选择器复制的输入 APK 副本等）
+        File[] cacheFiles = ctx.getCacheDir().listFiles();
+        if (cacheFiles != null) {
+            for (File f : cacheFiles) targets.add(f);
+        }
+        // 2. 导出目录：中间目录与历史加固产物
+        File out = new File(getOutputDir(ctx));
+        File[] outFiles = out.listFiles();
+        if (outFiles != null) {
+            for (File f : outFiles) {
+                if (f.isDirectory() && f.getName().startsWith("glass_work_")) {
+                    targets.add(f);
+                } else if (f.isFile() && f.getName().endsWith("_glass_protected.apk")) {
+                    targets.add(f);
+                }
+            }
+        }
+    }
+
+    private void confirmCleanCache() {
+        List<File> targets = new ArrayList<>();
+        collectCacheTargets(targets);
+        if (targets.isEmpty()) {
+            Toast.makeText(requireContext(), "没有可清理的缓存", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        long bytes = 0;
+        int files = 0;
+        for (File f : targets) {
+            bytes += dirSize(f);
+            files += countFiles(f);
+        }
+        String msg = "即将删除 " + files + " 个文件（" + fmtSize(bytes) + "）：\n\n"
+                + "· 输入 APK 缓存副本\n"
+                + "· 加固中间文件（glass_work_*）\n"
+                + "· 历史加固产物（*_glass_protected.apk）\n\n"
+                + "删除后不可恢复，确认清理？";
+        new AlertDialog.Builder(requireContext())
+                .setTitle("清理缓存")
+                .setMessage(msg)
+                .setPositiveButton("清理", (d, w) -> doCleanCache(targets))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doCleanCache(List<File> targets) {
+        long freed = 0;
+        for (File f : targets) {
+            freed += dirSize(f);
+            deleteRecursively(f);
+        }
+        updateCacheInfo();
+        Toast.makeText(requireContext(), "已清理 " + fmtSize(freed), Toast.LENGTH_SHORT).show();
+    }
+
+    private static long dirSize(File f) {
+        if (f == null || !f.exists()) return 0;
+        if (f.isFile()) return f.length();
+        long s = 0;
+        File[] list = f.listFiles();
+        if (list != null) {
+            for (File c : list) s += dirSize(c);
+        }
+        return s;
+    }
+
+    private static int countFiles(File f) {
+        if (f == null || !f.exists()) return 0;
+        if (f.isFile()) return 1;
+        int n = 0;
+        File[] list = f.listFiles();
+        if (list != null) {
+            for (File c : list) n += countFiles(c);
+        }
+        return n;
+    }
+
+    private static void deleteRecursively(File f) {
+        if (f == null || !f.exists()) return;
+        File[] list = f.listFiles();
+        if (list != null) {
+            for (File c : list) deleteRecursively(c);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+    }
+
+    private static String fmtSize(long b) {
+        if (b < 1024) return b + " B";
+        if (b < 1024 * 1024) return String.format(Locale.US, "%.1f KB", b / 1024.0);
+        return String.format(Locale.US, "%.1f MB", b / 1024.0 / 1024.0);
     }
 
     private void updateKeystoreInfo() {

@@ -54,6 +54,8 @@ final class ShellData {
     String[] dexAssets;
     /** DEX 载荷 SHA-256 清单（防篡改），空数组表示不校验 */
     String[] dexSha;
+    /** 原 APK 的 AppComponentFactory 类名（空表示原 APK 未使用） */
+    String origFactory;
     /** 配置来源是否为 native ELF 容器 */
     boolean fromElf;
 
@@ -116,6 +118,7 @@ final class ShellData {
         d.dexEnc = obj.optBoolean("dexEnc", true);
         d.dexAssets = splitList(obj.optString("dexAssets", ""));
         d.dexSha = splitList(obj.optString("dexSha", ""));
+        d.origFactory = obj.optString("origFactory", "");
         d.fromElf = elf;
         return d;
     }

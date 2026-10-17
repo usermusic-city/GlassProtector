@@ -62,6 +62,8 @@ import com.android.apksig.ApkSigner;
 public class GlassProtectorEngine {
 
     private static final String SHELL_APP_NAME = "com.glass.shell.GlassApplication";
+    /** 壳代理 AppComponentFactory（API 28+，接管原 factory） */
+    private static final String SHELL_FACTORY_NAME = "com.glass.shell.GlassAppComponentFactory";
     private static final String CONFIG_ASSET = "glass.dat";
     private static final String DEX_ASSET_FORMAT = "glass_dex_%d.enc";
     private static final String SHELL_DEX_ASSET = "shell.dex";
@@ -122,9 +124,9 @@ public class GlassProtectorEngine {
         writeBytes(manifestIn, manifestData);
         String origApp = getManifestAttr(manifestData, "application", "name");
         String acf = getManifestAttr(manifestData, "application", "appComponentFactory");
-        if (acf != null && !acf.isEmpty() && !"androidx.core.app.CoreComponentFactory".equals(acf)) {
-            throw new Exception("原 APK 使用了自定义 appComponentFactory(" + acf
-                    + ")，Glass 引擎暂不支持该配置");
+        boolean hasAcf = acf != null && !acf.isEmpty();
+        if (hasAcf) {
+            log("  自定义 appComponentFactory: " + acf + "（壳代理接管）");
         }
         log("  原 Application: " + (origApp == null ? "(无，使用默认)" : origApp));
 
@@ -159,6 +161,7 @@ public class GlassProtectorEngine {
         String signSha256 = certSha256(keyStoreFile);
         JSONObject cfg = new JSONObject();
         cfg.put("origApp", origApp == null ? "" : origApp);
+        cfg.put("origFactory", hasAcf ? acf : "");
         cfg.put("dexCount", encDexes.size());
         cfg.put("signSha256", config.isGlassSignVerify() ? signSha256 : "");
         cfg.put("antiDebug", config.isGlassAntiDebug());
@@ -223,6 +226,10 @@ public class GlassProtectorEngine {
         File manifestOut = new File(workDir, "AndroidManifest_new.xml");
         ModificationProperty property = new ModificationProperty();
         property.addApplicationAttribute(new AttributeItem(NodeValue.Application.NAME, SHELL_APP_NAME));
+        if (hasAcf) {
+            // 原 factory 类名存入壳配置，manifest 指向壳代理工厂
+            property.addApplicationAttribute(new AttributeItem("appComponentFactory", SHELL_FACTORY_NAME));
+        }
         property.addApplicationAttribute(new AttributeItem(NodeValue.Application.EXTRACTNATIVELIBS, "true"));
         FileProcesser.processManifestFile(manifestIn.getAbsolutePath(),
                 manifestOut.getAbsolutePath(), property);
@@ -288,6 +295,16 @@ public class GlassProtectorEngine {
 
         // 清理工作目录
         deleteRecursive(workDir);
+        // 清理 cache 中的输入 APK 副本（文件选择器复制产生，防堆积）
+        try {
+            File cacheDir = appContext != null ? appContext.getCacheDir() : null;
+            if (cacheDir != null && input.getParentFile() != null
+                    && cacheDir.getAbsolutePath().equals(input.getParentFile().getAbsolutePath())
+                    && input.delete()) {
+                log("已自动清理输入缓存副本: " + input.getName());
+            }
+        } catch (Throwable ignored) {
+        }
         log("=== 加固完成: " + outApk.getAbsolutePath() + " ===");
         log("加固说明: 原 DEX 已" + (dexEnc ? "全部 AES 加密，运行时由壳解密加载" : "明文存储（dexEncrypt 关闭）")
                 + "；加载前逐一 SHA-256 完整性校验；");

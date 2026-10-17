@@ -214,6 +214,61 @@
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
+        <!-- 缓存管理 -->
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            app:cardBackgroundColor="@android:color/transparent"
+            app:cardElevation="0dp"
+            app:cardCornerRadius="20dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/glass_card_bg"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="缓存管理"
+                    android:textColor="@color/glass_text_primary"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="清理历史加固产物与临时缓存（含导出目录的中间文件）"
+                    android:textColor="@color/glass_text_hint"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/cacheSizeText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/glass_spinner_bg"
+                    android:padding="12dp"
+                    android:textColor="@color/glass_text_primary"
+                    android:textSize="12sp"
+                    android:fontFamily="monospace" />
+
+                <Button
+                    android:id="@+id/cleanCacheBtn"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="清理缓存"
+                    android:textSize="13sp"
+                    style="@style/GlassButton" />
+
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
         <!-- 其他设置 -->
         <androidx.cardview.widget.CardView
             android:layout_width="match_parent"

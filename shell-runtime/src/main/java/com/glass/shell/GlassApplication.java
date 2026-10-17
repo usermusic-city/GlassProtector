@@ -81,8 +81,37 @@ public class GlassApplication extends Application {
         // 5. 注入宿主 ClassLoader
         DexInjector.inject(host, loader);
 
+        // 5.5 原 appComponentFactory 接管（API 28+，失败降级默认实例化）
+        setupOrigFactory(loader, cfg);
+
         // 6. 替换回原 Application
         swapApplication(cfg.origApplication);
+    }
+
+    /**
+     * 实例化原 APK 的 AppComponentFactory 并注入壳代理工厂。
+     * 必须在 swapApplication 之前完成：LoadedApk.makeApplication（API 28+）会经
+     * 壳 factory 回调 instantiateApplication(原 App 类)，此时委托原 factory
+     * 以保留其初始化逻辑（如 LSPatch/Xposed 桥注入）。
+     */
+    private void setupOrigFactory(ClassLoader loader, ShellData cfg) {
+        String name = cfg.origFactory;
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+        try {
+            Class<?> fc = loader.loadClass(name);
+            Object inst = fc.getDeclaredConstructor().newInstance();
+            if (inst instanceof android.app.AppComponentFactory) {
+                GlassAppComponentFactory.setOrigFactory((android.app.AppComponentFactory) inst);
+                android.util.Log.i("GlassShell", "orig appComponentFactory proxied: " + name);
+            } else {
+                android.util.Log.w("GlassShell", "orig factory not AppComponentFactory: " + name);
+            }
+        } catch (Throwable t) {
+            // 原 factory 初始化失败：降级为默认实例化，不阻断启动
+            android.util.Log.w("GlassShell", "orig factory init failed, fallback to default", t);
+        }
     }
 
     private static String sha256Hex(byte[] data) throws Exception {
