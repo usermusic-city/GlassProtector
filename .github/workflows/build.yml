@@ -45,7 +45,12 @@ jobs:
         working-directory: dpt-shell
         run: |
           chmod +x gradlew
-          ./gradlew :dpt:jar :shell:assembleRelease --no-daemon
+          # 必须分两次调用：shell/build.gradle 的 afterAssembleCopy 钩子
+          # 依据 startParameter.taskNames[0] 精确匹配 "shell:assembleRelease"，
+          # 若同一命令行混入其他任务（如 :dpt:jar）则钩子不触发，executable/shell-files 不生成
+          ./gradlew :dpt:jar --no-daemon
+          ./gradlew shell:assembleRelease --no-daemon
+          ls -la executable/
 
       - name: Convert dpt.jar to DEX
         run: |
