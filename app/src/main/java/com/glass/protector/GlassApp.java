@@ -13,6 +13,7 @@ public class GlassApp extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        AppContextHolder.init(this);
         createNotificationChannel();
     }
 

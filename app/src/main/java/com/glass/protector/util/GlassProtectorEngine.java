@@ -1,439 +1,426 @@
 package com.glass.protector.util;
 
-import com.glass.protector.service.ProtectConfig;
+import android.content.Context;
 
+import com.glass.protector.service.ProtectConfig;
+import com.wind.meditor.core.FileProcesser;
+import com.wind.meditor.property.AttributeItem;
+import com.wind.meditor.property.ModificationProperty;
+import com.wind.meditor.utils.NodeValue;
+
+import org.json.JSONObject;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
+import java.util.Locale;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import pxb.android.axml.AxmlParser;
+
 /**
- * 自研Glass加固引擎
- * 完全自主实现的APK加固方案，包含：
- * 1. DEX AES-256加密（运行时内存解密，不落盘）
- * 2. 字符串常量池加密（XOR + Base64）
- * 3. 反调试检测（ptrace检测 + Frida检测 + 调试端口检测）
- * 4. 签名校验（SHA-256证书指纹校验）
- * 5. 资源混淆（资源名重命名 + arsc混淆）
- * 6. 垃圾代码注入（控制流平坦化 + 无效指令）
+ * Glass 自研加固引擎 —— 真实现。
+ * <p>
+ * 加固流程：
+ * 1. 解析原 APK 的 AndroidManifest.xml，读取原 Application 类名
+ * 2. 把原 APK 的全部 classes*.dex 用 AES-128-CBC 加密，写入 assets/glass_dex_N.enc
+ * 3. 生成壳配置（原 Application 名、AES 密钥、签名指纹、防护开关），AES 加密后写 assets/glass.dat
+ * 4. 用壳 DEX（assets/shell.dex）替换 classes.dex，manifest 的 application name 改为壳入口
+ * 5. zipalign 对齐
+ * 6. apksigner（v1+v2）用 PKCS12 证书重签名
+ * <p>
+ * 运行时壳（com.glass.shell.GlassApplication）负责解密 DEX、注入 ClassLoader、
+ * 替换回原 Application、执行反调试/签名校验。
  */
 public class GlassProtectorEngine {
 
-    private ProtectConfig config;
-    private List<String> logs = new ArrayList<>();
-    private byte[] aesKey;
-    private byte[] aesIv;
+    private static final String SHELL_APP_NAME = "com.glass.shell.GlassApplication";
+    private static final String CONFIG_ASSET = "glass.dat";
+    private static final String DEX_ASSET_FORMAT = "glass_dex_%d.enc";
+    private static final String SHELL_DEX_ASSET = "shell.dex";
+    private static final String KEYSTORE_ASSET = "glass.p12";
+    private static final String KEYSTORE_PASSWORD = "glass123";
+    private static final String KEYSTORE_ALIAS = "glass";
+    /** XOR 混淆盐，与壳 ShellData 保持一致 */
+    private static final int[] XOR_SALT = {0x37, 0x51, 0x6C, 0x22, 0x4F, 0x19, 0x7A, 0x63,
+            0x2E, 0x58, 0x41, 0x76, 0x33, 0x6D, 0x25, 0x4B};
+
+    private final ProtectConfig config;
+    private final List<String> logs = new ArrayList<>();
+    private final Context appContext;
 
     public GlassProtectorEngine(ProtectConfig config) {
         this.config = config;
-        // 生成随机AES密钥
-        this.aesKey = generateRandomBytes(32);
-        this.aesIv = generateRandomBytes(16);
+        this.appContext = com.glass.protector.AppContextHolder.get();
     }
 
     public List<String> getLogs() {
         return logs;
     }
 
-    /**
-     * 执行Glass自研加固
-     */
+    private void log(String msg) {
+        logs.add(msg);
+    }
+
     public String protect() throws Exception {
         logs.clear();
-        log("=== Glass自研加固引擎启动 ===");
-        log("输入文件: " + config.getInputApkPath());
-        log("加固强度: " + config.getLevel());
-        log("AES密钥: " + bytesToHex(aesKey).substring(0, 16) + "...");
+        log("=== Glass 加固引擎（DEX 加密壳） ===");
+        log("输入: " + config.getInputApkPath());
 
-        String inputPath = config.getInputApkPath();
-        String outputDir = config.getOutputDir();
-        ApkUtils.ensureDir(outputDir);
+        File input = new File(config.getInputApkPath());
+        if (!input.isFile()) {
+            throw new Exception("输入 APK 不存在: " + input);
+        }
+        String outDir = config.getOutputDir();
+        ApkUtils.ensureDir(outDir);
+        File workDir = new File(outDir, "glass_work_" + System.currentTimeMillis());
+        ApkUtils.ensureDir(workDir.getAbsolutePath());
+        File unsignedApk = new File(workDir, "unsigned.apk");
+        File alignedApk = new File(workDir, "aligned.apk");
+        String outName = input.getName().replace(".apk", "") + "_glass_protected.apk";
+        File outApk = new File(outDir, outName);
 
-        // 步骤1: 解压APK
-        log("[1/10] 解压APK文件...");
-        String workDir = outputDir + "/glass_work";
-        ApkUtils.ensureDir(workDir);
-        unzipApk(inputPath, workDir);
-        log("  -> APK解压完成");
+        // 0. 壳 dex 与 keystore 从本 APP assets 释放
+        File shellDex = extractAsset(SHELL_DEX_ASSET, new File(workDir, SHELL_DEX_ASSET));
+        File keyStoreFile = extractAsset(KEYSTORE_ASSET, new File(workDir, KEYSTORE_ASSET));
 
-        // 步骤2: DEX加密
-        if (config.isDexEncrypt()) {
-            log("[2/10] AES-256加密DEX文件...");
-            int encryptedDexCount = encryptDexFiles(workDir);
-            log("  -> 已加密 " + encryptedDexCount + " 个DEX文件");
-        } else {
-            log("[2/10] 跳过DEX加密");
+        // 1. 解析 manifest
+        log("[1/7] 解析 AndroidManifest.xml ...");
+        byte[] manifestData = readZipEntry(input, "AndroidManifest.xml");
+        File manifestIn = new File(workDir, "AndroidManifest.xml");
+        writeBytes(manifestIn, manifestData);
+        String origApp = getManifestAttr(manifestData, "application", "name");
+        String acf = getManifestAttr(manifestData, "application", "appComponentFactory");
+        if (acf != null && !acf.isEmpty() && !"androidx.core.app.CoreComponentFactory".equals(acf)) {
+            throw new Exception("原 APK 使用了自定义 appComponentFactory(" + acf
+                    + ")，Glass 引擎暂不支持，请改用 DPT 引擎");
+        }
+        log("  原 Application: " + (origApp == null ? "(无，使用默认)" : origApp));
+
+        // 2. 生成 AES 密钥并加密全部 DEX
+        log("[2/7] AES 加密 DEX ...");
+        byte[] aesKey = new byte[16];
+        new SecureRandom().nextBytes(aesKey);
+        List<String> dexNames = listDexEntries(input);
+        if (dexNames.isEmpty()) {
+            throw new Exception("原 APK 中没有找到 DEX 文件");
+        }
+        List<byte[]> encDexes = new ArrayList<>();
+        long totalDexBytes = 0;
+        for (String dexName : dexNames) {
+            byte[] dex = readZipEntry(input, dexName);
+            totalDexBytes += dex.length;
+            encDexes.add(aesEncrypt(aesKey, dex));
+        }
+        log("  加密 " + encDexes.size() + " 个 DEX，共 " + (totalDexBytes / 1024) + " KB");
+
+        // 3. 生成壳配置
+        log("[3/7] 生成壳配置 ...");
+        String signSha256 = certSha256(keyStoreFile);
+        JSONObject cfg = new JSONObject();
+        cfg.put("origApp", origApp == null ? "" : origApp);
+        cfg.put("dexCount", encDexes.size());
+        cfg.put("signSha256", config.isGlassSignVerify() ? signSha256 : "");
+        cfg.put("antiDebug", config.isGlassAntiDebug());
+        cfg.put("antiFrida", config.isGlassAntiDebug());
+        byte[] cfgEnc = buildConfigBlob(aesKey, cfg);
+
+        // 4. 编辑 manifest：application name → 壳，extractNativeLibs=true
+        log("[4/7] 改写 manifest（壳入口接管）...");
+        File manifestOut = new File(workDir, "AndroidManifest_new.xml");
+        ModificationProperty property = new ModificationProperty();
+        property.addApplicationAttribute(new AttributeItem(NodeValue.Application.NAME, SHELL_APP_NAME));
+        property.addApplicationAttribute(new AttributeItem(NodeValue.Application.EXTRACTNATIVELIBS, "true"));
+        FileProcesser.processManifestFile(manifestIn.getAbsolutePath(),
+                manifestOut.getAbsolutePath(), property);
+        byte[] newManifest = readFile(manifestOut);
+
+        // 5. 重打包
+        log("[5/7] 重打包 APK ...");
+        rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes);
+
+        // 6. zipalign
+        log("[6/7] zipalign 对齐 ...");
+        try (RandomAccessFile raf = new RandomAccessFile(unsignedApk, "r");
+             OutputStream os = new BufferedOutputStream(new FileOutputStream(alignedApk))) {
+            com.iyxan23.zipalignjava.ZipAlign.alignZip(raf, os);
         }
 
-        // 步骤3: 字符串加密
-        if (config.isGlassStringEncrypt()) {
-            log("[3/10] 加密字符串常量池...");
-            int encryptedStrings = encryptStringPool(workDir);
-            log("  -> 已加密 " + encryptedStrings + " 个字符串常量");
-        } else {
-            log("[3/10] 跳过字符串加密");
-        }
+        // 7. apksigner 签名（v1+v2）
+        log("[7/7] apksigner 重签名 (v1+v2) ...");
+        signApk(alignedApk, keyStoreFile, outApk);
 
-        // 步骤4: 卢恩字符混淆
-        if (config.isRuneObfuscateEnabled()) {
-            log("[4/10] 卢恩字符混淆（类名/方法名）...");
-            int obfuscatedNames = runeObfuscate(workDir);
-            log("  -> 已混淆 " + obfuscatedNames + " 个名称，已注入运行时解析器");
-        } else {
-            log("[4/10] 跳过卢恩字符混淆");
-        }
-
-        // 步骤5: Dex2C转换
-        if (config.isDex2cEnabled()) {
-            log("[5/10] Dex2C转换（Java方法转C Native）...");
-            int convertedMethods = dex2cConvert(workDir);
-            log("  -> 已转换 " + convertedMethods + " 个方法为C Native代码");
-        } else {
-            log("[5/10] 跳过Dex2C转换");
-        }
-
-        // 步骤6: assets加密
-        if (config.isAssetsEncryptEnabled()) {
-            log("[6/10] assets资源加密...");
-            int encryptedAssets = encryptAssets(workDir);
-            log("  -> 已加密 " + encryptedAssets + " 个assets资源文件");
-        } else {
-            log("[6/10] 跳过assets加密");
-        }
-
-        // 步骤7: 反调试注入
-        if (config.isGlassAntiDebug()) {
-            log("[7/10] 注入反调试检测...");
-            injectAntiDebug(workDir);
-            log("  -> ptrace检测 + Frida检测 + 调试端口检测已注入");
-        } else {
-            log("[7/10] 跳过反调试注入");
-        }
-
-        // 步骤8: 签名校验
-        if (config.isGlassSignVerify()) {
-            log("[8/10] 注入签名校验...");
-            injectSignVerify(workDir);
-            log("  -> SHA-256证书指纹校验已注入");
-        } else {
-            log("[8/10] 跳过签名校验");
-        }
-
-        // 步骤9: 资源混淆 + 垃圾代码
-        if (config.isResourceObfuscate()) {
-            log("[9/10] 资源混淆处理...");
-            int obfuscatedResources = obfuscateResources(workDir);
-            log("  -> 已混淆 " + obfuscatedResources + " 个资源");
-        }
-        if (config.isGlassJunkCode()) {
-            log("  -> 注入垃圾代码（控制流平坦化）...");
-            injectJunkCode(workDir);
-        }
-        if (!config.isResourceObfuscate() && !config.isGlassJunkCode()) {
-            log("[9/10] 跳过资源混淆和垃圾代码");
-        }
-
-        // 步骤10: 生成壳并重新打包
-        log("[10/10] 生成壳DEX并重新打包...");
-        generateShell(workDir);
-        String outputApk = outputDir + "/GlassProtector_glass_output.apk";
-        zipApk(workDir, outputApk);
-        log("  -> 打包完成，已签名");
-
-        // 清理
-        deleteDir(new File(workDir));
-
-        log("=== Glass自研加固完成 ===");
-        log("输出文件: " + outputApk);
-
-        return outputApk;
+        // 清理工作目录
+        deleteRecursive(workDir);
+        log("=== 加固完成: " + outApk.getAbsolutePath() + " ===");
+        log("加固说明: 原 DEX 已全部 AES 加密，运行时由壳解密加载；");
+        log("反调试: " + (config.isGlassAntiDebug() ? "开启" : "关闭")
+                + "，签名校验: " + (config.isGlassSignVerify() ? "开启" : "关闭"));
+        return outApk.getAbsolutePath();
     }
 
-    /**
-     * AES-256加密DEX文件
-     */
-    private int encryptDexFiles(String workDir) throws Exception {
-        int count = 0;
-        File dir = new File(workDir);
-        File[] dexFiles = dir.listFiles((d, name) -> name.endsWith(".dex"));
-        if (dexFiles != null) {
-            for (File dexFile : dexFiles) {
-                byte[] dexData = readFile(dexFile);
-                byte[] encrypted = aesEncrypt(dexData);
-                // 将加密后的DEX写入assets目录，原位置替换为壳DEX
-                File assetsDir = new File(workDir, "assets");
-                assetsDir.mkdirs();
-                writeFile(new File(assetsDir, dexFile.getName() + ".enc"), encrypted);
-                // 原DEX文件替换为最小壳DEX
-                writeFile(dexFile, generateMinimalDex());
-                count++;
-            }
-        }
-        return count;
-    }
+    // ---------------- manifest ----------------
 
-    /**
-     * 字符串常量池加密
-     */
-    private int encryptStringPool(String workDir) {
-        // 遍历DEX字符串池，对字符串进行XOR加密
-        // 运行时通过解密函数还原
-        return 1024;
-    }
-
-    /**
-     * 注入反调试检测
-     */
-    private void injectAntiDebug(String workDir) {
-        // 注入以下检测：
-        // 1. ptrace自身，防止被附加调试
-        // 2. 检测Frida特征字符串（"frida", "gum-js-loop"等）
-        // 3. 检测调试端口（27042, 27043）
-        // 4. 检测TracerPid
-        // 5. 检测调试器连接（android.os.Debug.isDebuggerConnected()）
-    }
-
-    /**
-     * 注入签名校验
-     */
-    private void injectSignVerify(String workDir) {
-        // 获取原APK签名SHA-256，硬编码到壳中
-        // 运行时校验当前签名是否匹配，不匹配则退出
-    }
-
-    /**
-     * 资源混淆
-     */
-    private int obfuscateResources(String workDir) {
-        // 重命名res目录下的资源文件
-        // 混淆resources.arsc中的资源名
-        return 256;
-    }
-
-    /**
-     * 垃圾代码注入
-     */
-    private void injectJunkCode(String workDir) {
-        // 控制流平坦化：将顺序执行的代码转为switch分发
-        // 注入无效指令和不透明谓词
-    }
-
-    /**
-     * 生成壳DEX
-     */
-    private void generateShell(String workDir) {
-        // 壳DEX包含：
-        // 1. ProxyApplication - 替换原Application
-        // 2. DexLoader - 运行时解密并加载加密DEX
-        // 3. AntiDebug - 反调试检测
-        // 4. SignVerifier - 签名校验
-        // 5. StringDecryptor - 字符串解密器
-        // 6. RuneNameResolver - 卢恩字符混淆运行时解析器
-        // 7. AssetsDecryptor - assets资源运行时解密器
-    }
-
-    /**
-     * 卢恩字符混淆 - 将类名/方法名转换为卢恩符文，注入运行时解析器
-     * 映射表与代码一起加密存储，运行时动态恢复，不影响软件运行
-     */
-    private int runeObfuscate(String workDir) throws Exception {
-        RuneObfuscator obfuscator = new RuneObfuscator(
-                config.isRuneObfuscateClass(),
-                config.isRuneObfuscateMethod(),
-                config.isRuneObfuscatePackage()
-        );
-        int obfuscatedCount = 256; // 模拟混淆数量
-        // 生成运行时解析器代码
-        String resolverCode = obfuscator.generateResolverCode();
-        // 将映射表AES加密后写入assets
-        String mappingJson = obfuscator.generateMappingJson();
-        byte[] encryptedMapping = aesEncrypt(mappingJson.getBytes("UTF-8"));
-        File assetsDir = new File(workDir, "assets");
-        assetsDir.mkdirs();
-        File mappingFile = new File(assetsDir, "rune_mapping.enc");
-        try (FileOutputStream fos = new FileOutputStream(mappingFile)) {
-            fos.write(encryptedMapping);
-        }
-        log("  -> 卢恩映射表已AES加密存储到 assets/rune_mapping.enc");
-        return obfuscatedCount;
-    }
-
-    /**
-     * Dex2C转换 - 将Java方法转换为C Native代码
-     */
-    private int dex2cConvert(String workDir) throws Exception {
-        int convertedCount = 128;
-        File jniDir = new File(workDir, "jni");
-        jniDir.mkdirs();
-        File cFile = new File(jniDir, "glass_dex2c.c");
-        try (FileOutputStream fos = new FileOutputStream(cFile)) {
-            String cCode = "/* Auto-generated by GlassProtector Dex2C Engine */\n" +
-                    "#include <jni.h>\n" +
-                    "#include <string.h>\n" +
-                    "#include <stdlib.h>\n\n" +
-                    "/* Glass Dex2C converted native methods */\n" +
-                    "static JNINativeMethod gMethods[] = {\n" +
-                    "    /* {\"methodName\", \"signature\", (void*)native_func } */\n" +
-                    "};\n\n" +
-                    "JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {\n" +
-                    "    JNIEnv* env;\n" +
-                    "    if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) {\n" +
-                    "        return JNI_ERR;\n" +
-                    "    }\n" +
-                    "    return JNI_VERSION_1_6;\n" +
-                    "}\n";
-            fos.write(cCode.getBytes("UTF-8"));
-        }
-        log("  -> 生成C代码: jni/glass_dex2c.c");
-        return convertedCount;
-    }
-
-    /**
-     * assets资源加密 - 对assets目录下的文件进行AES-256加密
-     * 运行时通过AssetsDecryptor解密后再访问
-     */
-    private int encryptAssets(String workDir) throws Exception {
-        File assetsDir = new File(workDir, "assets");
-        if (!assetsDir.exists()) return 0;
-        int encryptedCount = 0;
-        File[] files = assetsDir.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                if (file.isFile() && !file.getName().endsWith(".enc")
-                        && !file.getName().equals("rune_mapping.enc")) {
-                    byte[] data = readFile(file);
-                    byte[] encrypted = aesEncrypt(data);
-                    File encFile = new File(assetsDir, file.getName() + ".enc");
-                    try (FileOutputStream fos = new FileOutputStream(encFile)) {
-                        fos.write(encrypted);
+    /** 用 pxb AxmlParser 从二进制 manifest 中读取属性值 */
+    private static String getManifestAttr(byte[] manifest, String tag, String attrName) {
+        try {
+            AxmlParser parser = new AxmlParser(manifest);
+            while (parser.next() != AxmlParser.END_FILE) {
+                if (parser.getAttrCount() == 0) continue;
+                if (!tag.equals(parser.getName())) continue;
+                for (int i = 0; i < parser.getAttrCount(); i++) {
+                    if (parser.getAttrName(i).equals(attrName)) {
+                        Object v = parser.getAttrValue(i);
+                        return v == null ? null : String.valueOf(v);
                     }
-                    file.delete();
-                    encryptedCount++;
                 }
             }
+        } catch (Exception ignored) {
         }
-        return encryptedCount;
+        return null;
     }
 
-    // ========== 工具方法 ==========
+    // ---------------- 加密 ----------------
 
-    private byte[] aesEncrypt(byte[] data) throws Exception {
-        SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
-        IvParameterSpec ivSpec = new IvParameterSpec(aesIv);
+    private static byte[] aesEncrypt(byte[] key, byte[] data) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec);
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(key));
         return cipher.doFinal(data);
     }
 
-    private byte[] generateRandomBytes(int length) {
-        byte[] bytes = new byte[length];
-        new SecureRandom().nextBytes(bytes);
-        return bytes;
+    /** 配置 JSON → AES 加密 → 头部拼 key → XOR 混淆（壳侧按相反顺序还原） */
+    private static byte[] buildConfigBlob(byte[] aesKey, JSONObject cfg) throws Exception {
+        byte[] cipherBody = aesEncrypt(aesKey, cfg.toString().getBytes(StandardCharsets.UTF_8));
+        byte[] blob = new byte[16 + cipherBody.length];
+        System.arraycopy(aesKey, 0, blob, 0, 16);
+        System.arraycopy(cipherBody, 0, blob, 16, cipherBody.length);
+        byte[] out = new byte[blob.length];
+        for (int i = 0; i < blob.length; i++) {
+            out[i] = (byte) (blob[i] ^ XOR_SALT[i % XOR_SALT.length]);
+        }
+        return out;
     }
 
-    private byte[] generateMinimalDex() {
-        // 生成最小有效DEX文件头（占位）
-        return new byte[]{0x64, 0x65, 0x78, 0x0A, 0x30, 0x33, 0x35, 0x00};
+    // ---------------- 重打包 ----------------
+
+    /**
+     * 流式重打包：原样复制所有 entry（保持 STORED/DEFLATED 与时间戳），
+     * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX 与加密 DEX。
+     */
+    private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
+                            byte[] configBlob, List<byte[]> encDexes) throws Exception {
+        try (ZipFile zip = new ZipFile(input);
+             ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
+
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry e = entries.nextElement();
+                String name = e.getName();
+                if (name.startsWith("classes") && name.endsWith(".dex")) continue;      // 旧 DEX
+                if (name.equals("AndroidManifest.xml")) continue;                        // 换新 manifest
+                if (name.startsWith("META-INF/")
+                        && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA")
+                        || name.endsWith(".EC") || name.endsWith(".MF"))) continue;       // 旧签名
+
+                copyEntry(zip, zos, e);
+            }
+
+            // 新 manifest
+            putEntry(zos, "AndroidManifest.xml", newManifest, ZipEntry.DEFLATED);
+            // 壳 DEX 作为主 DEX
+            putEntry(zos, "classes.dex", readFile(shellDex), ZipEntry.DEFLATED);
+            // 配置
+            putEntry(zos, "assets/" + CONFIG_ASSET, configBlob, ZipEntry.DEFLATED);
+            // 加密 DEX
+            for (int i = 0; i < encDexes.size(); i++) {
+                putEntry(zos, String.format(Locale.US, "assets/" + DEX_ASSET_FORMAT, i),
+                        encDexes.get(i), ZipEntry.DEFLATED);
+            }
+        }
     }
 
-    private String bytesToHex(byte[] bytes) {
+    private static void copyEntry(ZipFile zip, ZipOutputStream zos, ZipEntry e) throws Exception {
+        ZipEntry out = new ZipEntry(e.getName());
+        out.setTime(e.getTime());
+        if (e.getMethod() == ZipEntry.STORED) {
+            // resources.arsc 等 STORED 条目必须保持不压缩（targetSdk 30+ 安装要求）
+            out.setMethod(ZipEntry.STORED);
+            out.setSize(e.getSize());
+            out.setCompressedSize(e.getSize());
+            out.setCrc(e.getCrc());
+        }
+        zos.putNextEntry(out);
+        try (InputStream in = zip.getInputStream(e)) {
+            transfer(in, zos);
+        }
+        zos.closeEntry();
+    }
+
+    private static void putEntry(ZipOutputStream zos, String name, byte[] data, int method) throws Exception {
+        ZipEntry e = new ZipEntry(name);
+        e.setTime(System.currentTimeMillis());
+        if (method == ZipEntry.STORED) {
+            e.setMethod(ZipEntry.STORED);
+            e.setSize(data.length);
+            e.setCompressedSize(data.length);
+            e.setCrc(crc32(data));
+        }
+        zos.putNextEntry(e);
+        zos.write(data);
+        zos.closeEntry();
+    }
+
+    // ---------------- 签名 ----------------
+
+    private void signApk(File in, File keyStore, File out) throws Exception {
+        // apksigner 的 main 会把结果打在 stdout；错误会抛异常
+        com.android.apksigner.ApkSignerTool.main(new String[]{
+                "sign",
+                "--ks", keyStore.getAbsolutePath(),
+                "--ks-pass", "pass:" + KEYSTORE_PASSWORD,
+                "--key-pass", "pass:" + KEYSTORE_PASSWORD,
+                "--ks-key-alias", KEYSTORE_ALIAS,
+                "--v1-signing-enabled", "true",
+                "--v2-signing-enabled", "true",
+                "--v3-signing-enabled", "false",
+                "--out", out.getAbsolutePath(),
+                in.getAbsolutePath()
+        });
+        if (!out.isFile() || out.length() == 0) {
+            throw new Exception("签名失败：输出 APK 不存在");
+        }
+    }
+
+    /** 计算 keystore 证书 SHA-256（冒号分隔大写 hex），壳运行时用它做签名校验 */
+    private static String certSha256(File p12) throws Exception {
+        KeyStore ks = KeyStore.getInstance("PKCS12");
+        try (InputStream in = new FileInputStream(p12)) {
+            ks.load(in, KEYSTORE_PASSWORD.toCharArray());
+        }
+        java.security.cert.Certificate cert = ks.getCertificate(KEYSTORE_ALIAS);
+        if (cert == null) {
+            throw new Exception("keystore 中没有别名 " + KEYSTORE_ALIAS);
+        }
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        byte[] digest = md.digest(cert.getEncoded());
         StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
+        for (int i = 0; i < digest.length; i++) {
+            if (i > 0) sb.append(':');
+            sb.append(String.format("%02X", digest[i]));
         }
         return sb.toString();
     }
 
-    private byte[] readFile(File file) throws IOException {
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] data = new byte[(int) file.length()];
-            fis.read(data);
-            return data;
+    // ---------------- IO 工具 ----------------
+
+    private List<String> listDexEntries(File apk) throws Exception {
+        List<String> names = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(apk)) {
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry e = entries.nextElement();
+                String n = e.getName();
+                if (n.startsWith("classes") && n.endsWith(".dex")) {
+                    names.add(n);
+                }
+            }
+        }
+        names.sort((a, b) -> {
+            int ia = dexIndex(a), ib = dexIndex(b);
+            return Integer.compare(ia, ib);
+        });
+        return names;
+    }
+
+    private static int dexIndex(String name) {
+        // classes.dex -> 0, classes2.dex -> 1 ...
+        try {
+            String s = name.replace("classes", "").replace(".dex", "");
+            return s.isEmpty() ? 0 : Integer.parseInt(s) - 1;
+        } catch (NumberFormatException e) {
+            return Integer.MAX_VALUE;
         }
     }
 
-    private void writeFile(File file, byte[] data) throws IOException {
-        try (FileOutputStream fos = new FileOutputStream(file)) {
+    private static byte[] readZipEntry(File apk, String entryName) throws Exception {
+        try (ZipFile zip = new ZipFile(apk)) {
+            ZipEntry e = zip.getEntry(entryName);
+            if (e == null) return null;
+            try (InputStream in = zip.getInputStream(e)) {
+                return readAll(in);
+            }
+        }
+    }
+
+    /** 从本 APP 的 assets 释放文件 */
+    private File extractAsset(String assetName, File dest) throws Exception {
+        if (appContext == null) {
+            throw new Exception("Application context 不可用，无法释放内置资源 " + assetName);
+        }
+        try (InputStream in = appContext.getAssets().open(assetName)) {
+            writeBytes(dest, readAll(in));
+        }
+        return dest;
+    }
+
+    private static void writeBytes(File f, byte[] data) throws Exception {
+        try (FileOutputStream fos = new FileOutputStream(f)) {
             fos.write(data);
         }
     }
 
-    private void unzipApk(String apkPath, String destDir) throws IOException {
-        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(apkPath))) {
-            ZipEntry entry;
-            byte[] buffer = new byte[8192];
-            while ((entry = zis.getNextEntry()) != null) {
-                File outFile = new File(destDir, entry.getName());
-                if (entry.isDirectory()) {
-                    outFile.mkdirs();
-                } else {
-                    outFile.getParentFile().mkdirs();
-                    try (FileOutputStream fos = new FileOutputStream(outFile)) {
-                        int len;
-                        while ((len = zis.read(buffer)) != -1) {
-                            fos.write(buffer, 0, len);
-                        }
-                    }
-                }
-                zis.closeEntry();
-            }
+    private static byte[] readFile(File f) throws Exception {
+        try (InputStream in = new FileInputStream(f)) {
+            return readAll(in);
         }
     }
 
-    private void zipApk(String srcDir, String destApk) throws IOException {
-        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(destApk))) {
-            File srcFile = new File(srcDir);
-            addFileToZip(zos, srcFile, srcFile.getAbsolutePath());
-        }
+    private static byte[] readAll(InputStream in) throws Exception {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+        return bos.toByteArray();
     }
 
-    private void addFileToZip(ZipOutputStream zos, File file, String basePath) throws IOException {
-        if (file.isDirectory()) {
-            File[] children = file.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    addFileToZip(zos, child, basePath);
-                }
-            }
-        } else {
-            String entryName = file.getAbsolutePath().substring(basePath.length() + 1);
-            ZipEntry entry = new ZipEntry(entryName);
-            zos.putNextEntry(entry);
-            try (FileInputStream fis = new FileInputStream(file)) {
-                byte[] buffer = new byte[8192];
-                int len;
-                while ((len = fis.read(buffer)) != -1) {
-                    zos.write(buffer, 0, len);
-                }
-            }
-            zos.closeEntry();
-        }
+    private static void transfer(InputStream in, OutputStream out) throws Exception {
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
     }
 
-    private void deleteDir(File dir) {
-        if (dir.isDirectory()) {
-            File[] children = dir.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    deleteDir(child);
-                }
-            }
-        }
-        dir.delete();
+    private static long crc32(byte[] data) {
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        crc.update(data);
+        return crc.getValue();
     }
 
-    private void log(String msg) {
-        logs.add(msg);
-        System.out.println(msg);
+    private static void deleteRecursive(File f) {
+        if (f == null || !f.exists()) return;
+        File[] children = f.listFiles();
+        if (children != null) {
+            for (File c : children) deleteRecursive(c);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
     }
 }

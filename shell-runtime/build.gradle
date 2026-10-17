@@ -1,0 +1,25 @@
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'com.glass.shell'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 24
+        consumerProguardFiles 'consumer-rules.pro'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    // 壳运行时零依赖：不引入任何 AndroidX / 三方库
+}

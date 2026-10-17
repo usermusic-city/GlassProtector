@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "GlassProtector"
 include ':app'
-include ':dpt-core'
+include ':shell-runtime'

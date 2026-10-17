@@ -1,0 +1,93 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Setup CMake 3.31.1
+        uses: jwlawson/actions-setup-cmake@v1
+        with:
+          cmake-version: '3.31.1'
+
+      - name: Install NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" > /dev/null || true
+
+      # ============ 阶段 1：构建 dpt-shell 引擎（原版 + Android 运行时魔改） ============
+
+      - name: Clone dpt-shell (pinned commit)
+        run: |
+          git clone https://github.com/luoyesiqiu/dpt-shell dpt-shell
+          cd dpt-shell
+          git checkout 6a3c2bb
+          git submodule update --init --recursive
+
+      - name: Patch dpt-shell for Android runtime
+        run: python3 scripts/patch_dpt_for_android.py dpt-shell
+
+      - name: Build dpt processor jar + shell native libs
+        working-directory: dpt-shell
+        run: |
+          chmod +x gradlew
+          ./gradlew :dpt:jar :shell:assembleRelease --no-daemon
+
+      - name: Convert dpt.jar to DEX
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "using build-tools: $BT"
+          mkdir -p app/src/main/assets/dpt_engine/dex
+          "$BT/d8" --release --min-api 24 \
+            --output app/src/main/assets/dpt_engine/dex \
+            dpt-shell/executable/dpt.jar
+          ls -la app/src/main/assets/dpt_engine/dex/
+
+      - name: Copy shell-files into assets
+        run: |
+          rm -rf app/src/main/assets/dpt_engine/shell-files
+          cp -r dpt-shell/executable/shell-files app/src/main/assets/dpt_engine/
+          find app/src/main/assets/dpt_engine/shell-files -type f -printf "%p %s bytes\n"
+
+      # ============ 阶段 2：构建 Glass 壳 dex（shell-runtime） ============
+
+      - name: Build shell-runtime DEX
+        run: |
+          chmod +x gradlew
+          ./gradlew :shell-runtime:assembleRelease --no-daemon
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          rm -rf /tmp/aar && mkdir -p /tmp/aar
+          cd /tmp/aar
+          unzip -o "$OLDPWD/shell-runtime/build/outputs/aar/shell-runtime-release.aar" classes.jar
+          "$BT/d8" --release --min-api 24 --output . classes.jar
+          mv classes.dex "$OLDPWD/app/src/main/assets/shell.dex"
+          cd "$OLDPWD"
+          ls -la app/src/main/assets/shell.dex
+
+      # ============ 阶段 3：构建 GlassProtector APK ============
+
+      - name: Build GlassProtector APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlassProtector-APK
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

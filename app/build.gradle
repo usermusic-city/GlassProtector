@@ -17,10 +17,21 @@ android {
         }
     }
 
+    signingConfigs {
+        release {
+            storeFile file('src/main/assets/glass.p12')
+            storePassword 'glass123'
+            keyAlias 'glass'
+            keyPassword 'glass123'
+            storeType 'PKCS12'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
         }
     }
 
@@ -41,7 +52,7 @@ android {
 }
 
 dependencies {
-    implementation project(':dpt-core')
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
