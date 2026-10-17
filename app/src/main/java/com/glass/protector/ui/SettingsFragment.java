@@ -19,7 +19,6 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.Fragment;
 
 import com.glass.protector.R;
@@ -281,29 +280,14 @@ public class SettingsFragment extends Fragment {
     }
 
     private void confirmCleanCache() {
+        // 用户要求：点击直接清理，不要确认弹窗
         List<File> targets = new ArrayList<>();
         collectCacheTargets(targets);
         if (targets.isEmpty()) {
             Toast.makeText(requireContext(), "没有可清理的缓存", Toast.LENGTH_SHORT).show();
             return;
         }
-        long bytes = 0;
-        int files = 0;
-        for (File f : targets) {
-            bytes += dirSize(f);
-            files += countFiles(f);
-        }
-        String msg = "即将删除 " + files + " 个文件（" + fmtSize(bytes) + "）：\n\n"
-                + "· 输入 APK 缓存副本\n"
-                + "· 加固中间文件（glass_work_*）\n"
-                + "· 历史加固产物（*_glass_protected.apk）\n\n"
-                + "删除后不可恢复，确认清理？";
-        new AlertDialog.Builder(requireContext())
-                .setTitle("清理缓存")
-                .setMessage(msg)
-                .setPositiveButton("清理", (d, w) -> doCleanCache(targets))
-                .setNegativeButton("取消", null)
-                .show();
+        doCleanCache(targets);
     }
 
     private void doCleanCache(List<File> targets) {
