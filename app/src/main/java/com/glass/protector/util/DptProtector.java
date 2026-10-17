@@ -288,6 +288,10 @@ public class DptProtector {
         for (File c : children) {
             if (c.isFile() && c.getName().endsWith(".apk")
                     && !c.getName().equals(excludeName)
+                    // 签名失败时 DPT 会留下 unsigned_/unzipalign_ 中间包，不能当成功产物
+                    && !c.getName().startsWith("unsigned_")
+                    && !c.getName().startsWith("unzipalign_")
+                    && !c.getName().startsWith("temp_")
                     && (newest == null || c.lastModified() > newest.lastModified())) {
                 newest = c;
             }

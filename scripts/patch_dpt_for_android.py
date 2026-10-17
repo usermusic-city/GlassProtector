@@ -91,6 +91,61 @@ def main(dpt_root):
         ),
     ])
 
+    # ---------- 5. 签名走 apksig 库 API（Android 上 CLI 入口 System.exit 杀宿主进程） ----------
+    # ApkSignerTool.main() 末尾 System.exit(run(params))：签名成功 exit(0)、失败 exit(1)，
+    # 两者都会直接杀死 Android 宿主进程（表现为加固中 app 突然消失、回到加固页、无产物）。
+    # 与 GlassProtectorEngine.signApk 同款方案：ApkSigner.Builder 库 API 直接签名。
+    apk_java = dpt_root + '/dpt/src/main/java/com/luoye/dpt/builder/Apk.java'
+    patch_file(apk_java, [
+        (
+            '        int size = commandList.size();\n'
+            '        String[] commandArray = new String[size];\n'
+            '        commandArray = commandList.toArray(commandArray);\n'
+            '\n'
+            '        try {\n'
+            '            ApkSignerTool.main(commandArray);\n'
+            '        } catch (Exception e) {\n'
+            '            e.printStackTrace();\n'
+            '            return false;\n'
+            '        }\n'
+            '        return true;\n'
+            '    }',
+            '        try {\n'
+            '            java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");\n'
+            '            try (java.io.FileInputStream fin = new java.io.FileInputStream(keyStorePath)) {\n'
+            '                ks.load(fin, storePassword.toCharArray());\n'
+            '            }\n'
+            '            java.security.PrivateKey privateKey =\n'
+            '                    (java.security.PrivateKey) ks.getKey(keyAlias, KeyPassword.toCharArray());\n'
+            '            java.security.cert.X509Certificate cert =\n'
+            '                    (java.security.cert.X509Certificate) ks.getCertificate(keyAlias);\n'
+            '            if (privateKey == null || cert == null) {\n'
+            '                LogUtils.error("Sign fail: no key/cert for alias " + keyAlias);\n'
+            '                return false;\n'
+            '            }\n'
+            '            com.android.apksig.ApkSigner.SignerConfig signerConfig =\n'
+            '                    new com.android.apksig.ApkSigner.SignerConfig.Builder(\n'
+            '                            keyAlias, privateKey,\n'
+            '                            java.util.Collections.singletonList(cert)).build();\n'
+            '            com.android.apksig.ApkSigner signer =\n'
+            '                    new com.android.apksig.ApkSigner.Builder(\n'
+            '                            java.util.Collections.singletonList(signerConfig))\n'
+            '                            .setInputApk(new java.io.File(packagePath))\n'
+            '                            .setOutputApk(new java.io.File(signedPackagePath))\n'
+            '                            .setV1SigningEnabled(true)\n'
+            '                            .setV2SigningEnabled(true)\n'
+            '                            .setV3SigningEnabled(true)\n'
+            '                            .build();\n'
+            '            signer.sign();\n'
+            '            return true;\n'
+            '        } catch (Throwable t) {\n'
+            '            t.printStackTrace();\n'
+            '            return false;\n'
+            '        }\n'
+            '    }'
+        ),
+    ])
+
     # ---------- Java 9+ API 降级为 Java 8（d8 --min-api 24 无法 desugar 库 API） ----------
     dpt_main = dpt_root + '/dpt/src/main/java/com/luoye/dpt/Dpt.java'
     patch_file(dpt_main, [
