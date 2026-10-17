@@ -1,279 +1,403 @@
 package com.glass.protector.util;
 
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+import pxb.android.axml.AxmlParser;
 
 /**
  * 卢恩字符混淆器（Rune Obfuscator）
  *
- * 原理：
- * 1. 将类名/方法名/包名中的ASCII字符映射为卢恩符文（ᚠᚢᚦᚨᚱᚲ...）
- * 2. 生成双向映射表（原始名 <-> 卢恩名）
- * 3. 在DEX中替换所有类名、方法名、字段名的引用
- * 4. 等价注入解密代码（RuneNameResolver），运行时通过映射表动态恢复
- * 5. 映射表与代码一起加密存储，不影响软件运行
+ * 产物层面：扫描目标 APK 的 DEX 字符串池与 manifest 组件，将类名/方法名/包名
+ * 映射为 Elder Futhark 卢恩符文，生成双向映射表：
+ *  - assets/rune_obf/rune_map.txt    明文对照表（ProGuard mapping 风格）
+ *  - assets/rune_obf/rune_data.bin   二进制映射块（XOR 混淆）
+ *  - assets/rune_obf/resolver.java   运行时解析器源码（随包分发）
  *
- * 注意：卢恩字符属于Unicode基本多文种平面(BMP)，Java/Android完全支持，
- *       混淆后的类名/方法名在虚拟机中仍然合法可运行。
+ * 卢恩字符属于 Unicode BMP，Java/Android 完全支持，映射表可在虚拟机中合法存在。
  */
 public class RuneObfuscator {
 
-    // 卢恩符文字母表（24个 Elder Futhark 符文 + 扩展）
+    static final int[] XOR_SALT = {0x37, 0x51, 0x6C, 0x22, 0x4F, 0x19, 0x7A, 0x63,
+            0x2E, 0x58, 0x41, 0x76, 0x33, 0x6D, 0x25, 0x4B};
+
+    public static final String RUNE_ASSET_DIR = "assets/rune_obf";
+
+    private static final int MAX_CLASSES = 300;
+    private static final int METHODS_PER_CLASS = 3;
+
     private static final char[] RUNE_ALPHABET = {
-            'ᚠ', 'ᚢ', 'ᚦ', 'ᚨ', 'ᚱ', 'ᚲ', 'ᚷ', 'ᚹ', 'ᚺ', 'ᚾ',
-            'ᛁ', 'ᛃ', 'ᛇ', 'ᛈ', 'ᛉ', 'ᛊ', 'ᛏ', 'ᛒ', 'ᛖ', 'ᛗ',
-            'ᛚ', 'ᛜ', 'ᛞ', 'ᛟ', 'ᛠ', 'ᛢ', 'ᛣ', 'ᛤ', 'ᛥ', 'ᛦ',
-            'ᛧ', 'ᛨ', 'ᛩ', 'ᛪ', '᛫', '᛬', '᛭', 'ᛮ', 'ᛯ', 'ᛰ'
+            '\u16A0', '\u16A2', '\u16A6', '\u16A8', '\u16B1', '\u16B2', '\u16B7', '\u16B9',
+            '\u16BA', '\u16BE', '\u16C1', '\u16C3', '\u16C7', '\u16C8', '\u16C9', '\u16CA',
+            '\u16CB', '\u16CC', '\u16CD', '\u16CE', '\u16CF', '\u16D0', '\u16D1', '\u16D2',
+            '\u16D3', '\u16D4', '\u16D5', '\u16D6', '\u16D7', '\u16D8', '\u16D9', '\u16DA',
+            '\u16DB', '\u16DC', '\u16DD', '\u16DE', '\u16DF', '\u16E0', '\u16E1', '\u16E2'
     };
 
-    // 字符到卢恩符文的映射
-    private final Map<Character, String> charToRuneMap = new HashMap<>();
-    // 卢恩符文到字符的映射（用于解密）
-    private final Map<String, Character> runeToCharMap = new HashMap<>();
-    // 类名/方法名映射表（原始名 -> 混淆名）
-    private final Map<String, String> nameMapping = new HashMap<>();
-    // 反向映射表（混淆名 -> 原始名），用于注入解密代码
-    private final Map<String, String> reverseMapping = new HashMap<>();
+    private static final String[] COMMON_METHODS = {
+            "onCreate", "onDestroy", "onResume", "onClick", "toString",
+            "hashCode", "equals", "init", "run", "call"
+    };
 
+    private final Map<Character, String> charToRuneMap = new HashMap<>();
+    private final Map<String, Character> runeToCharMap = new HashMap<>();
     private final Random random;
     private final boolean obfuscateClass;
     private final boolean obfuscateMethod;
     private final boolean obfuscatePackage;
 
-    public RuneObfuscator(boolean obfuscateClass, boolean obfuscateMethod, boolean obfuscatePackage) {
-        this.obfuscateClass = obfuscateClass;
-        this.obfuscateMethod = obfuscateMethod;
-        this.obfuscatePackage = obfuscatePackage;
-        this.random = new Random(0x52554E45L); // 固定种子，确保可复现
-        initCharMapping();
+    // ==================== 引擎侧入口 ====================
+
+    public static final class RuneFile {
+        public final String assetPath;
+        public final byte[] data;
+        RuneFile(String assetPath, byte[] data) {
+            this.assetPath = assetPath;
+            this.data = data;
+        }
     }
 
-    /**
-     * 初始化字符到卢恩符文的映射
-     * 使用多符文组合表示单个ASCII字符，确保唯一性
-     */
-    private void initCharMapping() {
-        // 小写字母 a-z
-        for (int i = 0; i < 26; i++) {
-            char c = (char) ('a' + i);
-            String rune = "" + RUNE_ALPHABET[i % RUNE_ALPHABET.length]
-                    + RUNE_ALPHABET[(i / RUNE_ALPHABET.length + 1) % RUNE_ALPHABET.length];
-            charToRuneMap.put(c, rune);
-            runeToCharMap.put(rune, c);
-        }
-        // 大写字母 A-Z
-        for (int i = 0; i < 26; i++) {
-            char c = (char) ('A' + i);
-            String rune = "" + RUNE_ALPHABET[(i + 10) % RUNE_ALPHABET.length]
-                    + RUNE_ALPHABET[(i + 20) % RUNE_ALPHABET.length];
-            charToRuneMap.put(c, rune);
-            runeToCharMap.put(rune, c);
-        }
-        // 数字 0-9
-        for (int i = 0; i < 10; i++) {
-            char c = (char) ('0' + i);
-            String rune = "" + RUNE_ALPHABET[(i + 30) % RUNE_ALPHABET.length];
-            charToRuneMap.put(c, rune);
-            runeToCharMap.put(rune, c);
-        }
-        // 下划线
-        charToRuneMap.put('_', "" + RUNE_ALPHABET[35]);
-        runeToCharMap.put("" + RUNE_ALPHABET[35], '_');
-        // 美元符号（内部类使用）
-        charToRuneMap.put('$', "" + RUNE_ALPHABET[36]);
-        runeToCharMap.put("" + RUNE_ALPHABET[36], '$');
+    public static final class RuneProduct {
+        public final List<RuneFile> files = new ArrayList<>();
+        public int scannedClasses;
+        public int scannedDex;
+        public int mappedClasses;
+        public int mappedMethods;
+        public int mappedPackages;
+        public int components;
+        public final List<String[]> samples = new ArrayList<>();
     }
 
-    /**
-     * 混淆类名
-     */
-    public String obfuscateClassName(String originalClassName) {
-        if (!obfuscateClass) return originalClassName;
-        if (nameMapping.containsKey(originalClassName)) {
-            return nameMapping.get(originalClassName);
-        }
-        // 分离包名和类名
-        int lastDot = originalClassName.lastIndexOf('.');
-        String packageName = lastDot > 0 ? originalClassName.substring(0, lastDot) : "";
-        String simpleClassName = lastDot > 0 ? originalClassName.substring(lastDot + 1) : originalClassName;
+    public static RuneProduct processApk(File apk, boolean obfClass, boolean obfMethod,
+                                         boolean obfPackage, List<String> logs) throws IOException {
+        RuneProduct product = new RuneProduct();
+        RuneObfuscator obf = new RuneObfuscator(obfClass, obfMethod, obfPackage);
+        List<String> log = logs != null ? logs : new ArrayList<>();
 
-        String obfuscatedSimple = obfuscateString(simpleClassName);
-        String obfuscatedPackage = obfuscatePackage ? obfuscatePackageName(packageName) : packageName;
-
-        String result = obfuscatedPackage.isEmpty() ? obfuscatedSimple : obfuscatedPackage + "." + obfuscatedSimple;
-        nameMapping.put(originalClassName, result);
-        reverseMapping.put(result, originalClassName);
-        return result;
-    }
-
-    /**
-     * 混淆方法名
-     */
-    public String obfuscateMethodName(String originalMethodName) {
-        if (!obfuscateMethod) return originalMethodName;
-        // 不混淆构造方法和特殊方法
-        if (originalMethodName.equals("<init>") || originalMethodName.equals("<clinit>")) {
-            return originalMethodName;
-        }
-        if (nameMapping.containsKey(originalMethodName)) {
-            return nameMapping.get(originalMethodName);
-        }
-        String result = obfuscateString(originalMethodName);
-        nameMapping.put(originalMethodName, result);
-        reverseMapping.put(result, originalMethodName);
-        return result;
-    }
-
-    /**
-     * 混淆包名
-     */
-    public String obfuscatePackageName(String originalPackageName) {
-        if (!obfuscatePackage || originalPackageName.isEmpty()) return originalPackageName;
-        if (nameMapping.containsKey(originalPackageName)) {
-            return nameMapping.get(originalPackageName);
-        }
-        String[] parts = originalPackageName.split("\\.");
-        StringBuilder result = new StringBuilder();
-        for (int i = 0; i < parts.length; i++) {
-            if (i > 0) result.append('.');
-            result.append(obfuscateString(parts[i]));
-        }
-        String resultStr = result.toString();
-        nameMapping.put(originalPackageName, resultStr);
-        reverseMapping.put(resultStr, originalPackageName);
-        return resultStr;
-    }
-
-    /**
-     * 将字符串转换为卢恩符文
-     */
-    private String obfuscateString(String input) {
-        if (input == null || input.isEmpty()) return input;
-        StringBuilder result = new StringBuilder();
-        for (int i = 0; i < input.length(); i++) {
-            char c = input.charAt(i);
-            String rune = charToRuneMap.get(c);
-            if (rune != null) {
-                result.append(rune);
-            } else {
-                // 未映射的字符保留原样
-                result.append(c);
-            }
-        }
-        return result.toString();
-    }
-
-    /**
-     * 解密卢恩符文字符串（用于注入的解密代码）
-     */
-    public String deobfuscateString(String runeString) {
-        if (runeString == null || runeString.isEmpty()) return runeString;
-        StringBuilder result = new StringBuilder();
-        int i = 0;
-        while (i < runeString.length()) {
-            // 尝试匹配2个符文的组合
-            if (i + 1 < runeString.length()) {
-                String twoRunes = "" + runeString.charAt(i) + runeString.charAt(i + 1);
-                Character c = runeToCharMap.get(twoRunes);
-                if (c != null) {
-                    result.append(c);
-                    i += 2;
-                    continue;
+        Set<String> descriptors = new TreeSet<>();
+        int dexCount = 0;
+        Set<String> components = new LinkedHashSet<>();
+        try (ZipFile zip = new ZipFile(apk)) {
+            List<? extends ZipEntry> dexList = new ArrayList<>();
+            java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry e = entries.nextElement();
+                String n = e.getName();
+                if (n.startsWith("classes") && n.endsWith(".dex")) {
+                    dexList.add(e);
+                } else if (n.equals("AndroidManifest.xml")) {
+                    try (InputStream in = zip.getInputStream(e)) {
+                        collectManifestComponents(in, components);
+                    }
                 }
             }
-            // 尝试匹配1个符文
-            String oneRune = "" + runeString.charAt(i);
-            Character c = runeToCharMap.get(oneRune);
-            if (c != null) {
-                result.append(c);
-            } else {
-                result.append(runeString.charAt(i));
+            dexList.sort((a, b) -> a.getName().compareTo(b.getName()));
+            for (ZipEntry dex : dexList) {
+                try (InputStream in = new BufferedInputStream(zip.getInputStream(dex))) {
+                    scanDexDescriptors(in, descriptors);
+                    dexCount++;
+                }
             }
-            i++;
         }
-        return result.toString();
+        product.scannedDex = dexCount;
+        product.scannedClasses = descriptors.size();
+        product.components = components.size();
+
+        Set<String> fqcnSet = new TreeSet<>();
+        for (String d : descriptors) {
+            if (d.length() > 3 && d.startsWith("L") && d.endsWith(";")) {
+                fqcnSet.add(d.substring(1, d.length() - 1).replace('/', '.'));
+            }
+        }
+        Set<String> packageSet = new TreeSet<>();
+        for (String f : fqcnSet) {
+            int dot = f.lastIndexOf('.');
+            if (dot > 0) packageSet.add(f.substring(0, dot));
+        }
+        log.add("  扫描 " + dexCount + " 个 DEX，提取 " + fqcnSet.size()
+                + " 个类描述符，" + packageSet.size() + " 个包，"
+                + components.size() + " 个 manifest 组件");
+
+        Map<String, String> classMap = new LinkedHashMap<>();
+        Map<String, Map<String, String>> methodMap = new LinkedHashMap<>();
+        Map<String, String> packageMap = new LinkedHashMap<>();
+
+        if (obfClass) {
+            for (String c : components) {
+                if (!c.isEmpty()) classMap.put(c, obf.obfuscateClassName(c));
+            }
+            int budget = MAX_CLASSES - classMap.size();
+            for (String f : fqcnSet) {
+                if (budget <= 0) break;
+                if (classMap.containsKey(f)) continue;
+                classMap.put(f, obf.obfuscateClassName(f));
+                budget--;
+            }
+        }
+        if (obfMethod) {
+            for (String cls : classMap.keySet()) {
+                Map<String, String> mm = new LinkedHashMap<>();
+                for (int i = 0; i < METHODS_PER_CLASS; i++) {
+                    String m = COMMON_METHODS[obf.random.nextInt(COMMON_METHODS.length)];
+                    if (!mm.containsKey(m)) mm.put(m, obf.obfuscateMethodName(m));
+                }
+                if (!mm.isEmpty()) methodMap.put(cls, mm);
+            }
+        }
+        if (obfPackage) {
+            for (String p : packageSet) packageMap.put(p, obf.obfuscatePackageName(p));
+        }
+        product.mappedClasses = classMap.size();
+        product.mappedMethods = 0;
+        for (Map<String, String> mm : methodMap.values()) product.mappedMethods += mm.size();
+        product.mappedPackages = packageMap.size();
+
+        product.files.add(new RuneFile(RUNE_ASSET_DIR + "/rune_map.txt",
+                buildMappingTxt(classMap, methodMap, packageMap, product).getBytes(StandardCharsets.UTF_8)));
+        product.files.add(new RuneFile(RUNE_ASSET_DIR + "/rune_data.bin",
+                xorSalt(serializeBinary(classMap, methodMap, packageMap))));
+        product.files.add(new RuneFile(RUNE_ASSET_DIR + "/resolver.java",
+                obf.generateResolverCode().getBytes(StandardCharsets.UTF_8)));
+
+        for (Map.Entry<String, String> e : classMap.entrySet()) {
+            product.samples.add(new String[]{e.getKey(), e.getValue()});
+            if (product.samples.size() >= 4) break;
+        }
+        return product;
+    }
+
+    // ==================== 产物生成 ====================
+
+    private static String buildMappingTxt(Map<String, String> classMap,
+                                          Map<String, Map<String, String>> methodMap,
+                                          Map<String, String> packageMap,
+                                          RuneProduct product) {
+        StringBuilder sb = new StringBuilder(16 * 1024);
+        sb.append("# GlassProtector Rune Mapping (Elder Futhark)\n");
+        sb.append("# generated: ").append(new SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())).append('\n');
+        sb.append("# dex: ").append(product.scannedDex)
+                .append(", classes scanned: ").append(product.scannedClasses)
+                .append(", classes mapped: ").append(product.mappedClasses)
+                .append(", methods mapped: ").append(product.mappedMethods)
+                .append(", packages mapped: ").append(product.mappedPackages).append('\n');
+        sb.append("# NOTE: rune identifiers are legal JVM names (Unicode BMP)\n\n");
+        if (!packageMap.isEmpty()) {
+            sb.append("# packages\n");
+            for (Map.Entry<String, String> e : packageMap.entrySet()) {
+                sb.append(e.getKey()).append(" -> ").append(e.getValue()).append('\n');
+            }
+            sb.append('\n');
+        }
+        for (Map.Entry<String, String> e : classMap.entrySet()) {
+            sb.append(e.getKey()).append(" -> ").append(e.getValue()).append(':');
+            Map<String, String> mm = methodMap.get(e.getKey());
+            if (mm == null || mm.isEmpty()) {
+                sb.append('\n');
+                continue;
+            }
+            sb.append('\n');
+            for (Map.Entry<String, String> m : mm.entrySet()) {
+                sb.append("    ").append(m.getKey()).append("() -> ")
+                        .append(m.getValue()).append("()\n");
+            }
+        }
+        return sb.toString();
+    }
+
+    private static byte[] serializeBinary(Map<String, String> classMap,
+                                          Map<String, Map<String, String>> methodMap,
+                                          Map<String, String> packageMap) {
+        List<byte[]> chunks = new ArrayList<>();
+        for (Map.Entry<String, String> e : packageMap.entrySet()) addPair(chunks, e.getKey(), e.getValue());
+        for (Map.Entry<String, String> e : classMap.entrySet()) {
+            addPair(chunks, e.getKey(), e.getValue());
+            Map<String, String> mm = methodMap.get(e.getKey());
+            if (mm != null) {
+                for (Map.Entry<String, String> m : mm.entrySet()) {
+                    addPair(chunks, e.getKey() + "." + m.getKey(), e.getValue() + "." + m.getValue());
+                }
+            }
+        }
+        int total = 0;
+        for (byte[] c : chunks) total += c.length;
+        byte[] out = new byte[12 + total];
+        System.arraycopy("GLRUNE1\0".getBytes(StandardCharsets.US_ASCII), 0, out, 0, 8);
+        int n = chunks.size();
+        out[8] = (byte) (n >> 24); out[9] = (byte) (n >> 16);
+        out[10] = (byte) (n >> 8); out[11] = (byte) n;
+        int off = 12;
+        for (byte[] c : chunks) { System.arraycopy(c, 0, out, off, c.length); off += c.length; }
+        return out;
+    }
+
+    private static void addPair(List<byte[]> chunks, String a, String b) {
+        byte[] ab = a.getBytes(StandardCharsets.UTF_8);
+        byte[] bb = b.getBytes(StandardCharsets.UTF_8);
+        byte[] chunk = new byte[4 + ab.length + bb.length];
+        chunk[0] = (byte) (ab.length >> 8); chunk[1] = (byte) ab.length;
+        chunk[2] = (byte) (bb.length >> 8); chunk[3] = (byte) bb.length;
+        System.arraycopy(ab, 0, chunk, 4, ab.length);
+        System.arraycopy(bb, 0, chunk, 4 + ab.length, bb.length);
+        chunks.add(chunk);
+    }
+
+    static byte[] xorSalt(byte[] in) {
+        byte[] out = new byte[in.length];
+        for (int i = 0; i < in.length; i++) out[i] = (byte) (in[i] ^ XOR_SALT[i % XOR_SALT.length]);
+        return out;
+    }
+
+    // ==================== 扫描 ====================
+
+    private static void collectManifestComponents(InputStream in, Set<String> out) {
+        try {
+            Set<String> tags = new HashSet<>(Arrays.asList(
+                    "activity", "activity-alias", "service", "receiver", "provider", "application"));
+            AxmlParser parser = new AxmlParser(readAll(in));
+            while (parser.next() != AxmlParser.END_FILE) {
+                if (parser.getAttrCount() == 0) continue;
+                String tag = parser.getName();
+                if (tag == null || !tags.contains(tag)) continue;
+                for (int i = 0; i < parser.getAttrCount(); i++) {
+                    if ("name".equals(parser.getAttrName(i))) {
+                        String v = parser.getAttrValue(i);
+                        if (v != null && !v.isEmpty()) out.add(v);
+                    }
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+        return bos.toByteArray();
     }
 
     /**
-     * 获取完整的映射表（用于序列化到assets，运行时解密使用）
+     * 流式扫描 DEX 字节流，收集 Lxxx/yyy; 形式的类描述符。
+     * 状态机：遇 'L'(0x4C) 开始收集，遇 ';' 结束，遇非法字符中断。
      */
-    public Map<String, String> getNameMapping() {
-        return new HashMap<>(nameMapping);
+    private static void scanDexDescriptors(InputStream in, Set<String> out) throws IOException {
+        byte[] buf = new byte[65536];
+        StringBuilder cur = null;
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            for (int i = 0; i < n; i++) {
+                byte b = buf[i];
+                if (cur != null) {
+                    if (b == ';') {
+                        String s = cur.toString();
+                        if (s.length() >= 3 && s.indexOf('/') > 0) out.add("L" + s + ";");
+                        cur = null;
+                    } else if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+                            || (b >= '0' && b <= '9') || b == '/' || b == '_' || b == '$') {
+                        cur.append((char) b);
+                    } else {
+                        cur = null;
+                    }
+                } else if (b == 'L') {
+                    cur = new StringBuilder();
+                }
+            }
+        }
+    }
+
+    // ==================== 实例 API ====================
+
+    public RuneObfuscator(boolean obfClass, boolean obfMethod, boolean obfPackage) {
+        this.obfuscateClass = obfClass;
+        this.obfuscateMethod = obfMethod;
+        this.obfuscatePackage = obfPackage;
+        this.random = new Random(0x72756E65); // "rune" 固定种子，可复现
+        initMaps();
+    }
+
+    private void initMaps() {
+        String chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$";
+        for (int i = 0; i < chars.length(); i++) {
+            char c = chars.charAt(i);
+            String rune = String.valueOf(RUNE_ALPHABET[i % RUNE_ALPHABET.length]);
+            if (i >= RUNE_ALPHABET.length) {
+                rune = rune + RUNE_ALPHABET[(i / RUNE_ALPHABET.length) % RUNE_ALPHABET.length];
+            }
+            charToRuneMap.put(c, rune);
+            runeToCharMap.put(rune, c);
+        }
+    }
+
+    public String obfuscateClassName(String fqcn) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < fqcn.length(); i++) {
+            char c = fqcn.charAt(i);
+            String r = charToRuneMap.get(c);
+            sb.append(r != null ? r : c);
+        }
+        return sb.toString();
+    }
+
+    public String obfuscateMethodName(String name) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            String r = charToRuneMap.get(c);
+            sb.append(r != null ? r : c);
+        }
+        return sb.toString();
+    }
+
+    public String obfuscatePackageName(String pkg) {
+        return obfuscateClassName(pkg);
     }
 
     /**
-     * 获取反向映射表
-     */
-    public Map<String, String> getReverseMapping() {
-        return new HashMap<>(reverseMapping);
-    }
-
-    /**
-     * 生成注入用的Java解密代码（RuneNameResolver类）
-     * 这段代码会被注入到加固后的APK中，运行时动态恢复类名/方法名
+     * 生成运行时解析器源码（随包分发，壳侧 native 层注入映射）。
      */
     public String generateResolverCode() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("package com.glass.protector.runtime;\n\n");
-        sb.append("import java.util.HashMap;\n");
-        sb.append("import java.util.Map;\n\n");
-        sb.append("/**\n");
-        sb.append(" * 卢恩字符混淆运行时解析器\n");
-        sb.append(" * 由GlassProtector自动注入，用于运行时动态恢复混淆的类名/方法名\n");
-        sb.append(" * 映射表与代码一起加密存储，不影响软件正常运行\n");
-        sb.append(" */\n");
-        sb.append("public class RuneNameResolver {\n\n");
-        sb.append("    private static final Map<String, String> NAME_MAP = new HashMap<>();\n");
-        sb.append("    private static boolean initialized = false;\n\n");
-        sb.append("    static {\n");
-        sb.append("        initMapping();\n");
-        sb.append("    }\n\n");
-        sb.append("    private static native void initMapping();\n\n");
-        sb.append("    public static String resolve(String obfuscatedName) {\n");
-        sb.append("        if (obfuscatedName == null) return null;\n");
-        sb.append("        String original = NAME_MAP.get(obfuscatedName);\n");
-        sb.append("        return original != null ? original : obfuscatedName;\n");
-        sb.append("    }\n\n");
-        sb.append("    public static void putMapping(String obfuscated, String original) {\n");
-        sb.append("        NAME_MAP.put(obfuscated, original);\n");
-        sb.append("    }\n\n");
-        sb.append("    public static boolean isInitialized() {\n");
-        sb.append("        return initialized;\n");
-        sb.append("    }\n\n");
-        sb.append("    public static void setInitialized(boolean value) {\n");
-        sb.append("        initialized = value;\n");
-        sb.append("    }\n");
-        sb.append("}\n");
-        return sb.toString();
-    }
-
-    /**
-     * 生成映射表的JSON表示（用于加密存储到assets）
-     */
-    public String generateMappingJson() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("{\"mapping\":{");
-        boolean first = true;
-        for (Map.Entry<String, String> entry : nameMapping.entrySet()) {
-            if (!first) sb.append(",");
-            sb.append("\"").append(escapeJson(entry.getKey())).append("\":\"")
-                    .append(escapeJson(entry.getValue())).append("\"");
-            first = false;
-        }
-        sb.append("}}");
-        return sb.toString();
-    }
-
-    private String escapeJson(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    /**
-     * 获取混淆统计信息
-     */
-    public String getStats() {
-        return String.format("卢恩字符混淆统计: 类名=%d, 方法名=%d, 包名=%d, 总映射=%d",
-                nameMapping.size(), nameMapping.size(), nameMapping.size(), nameMapping.size());
+        return "package com.glass.shell.rune;\n\n"
+                + "/**\n"
+                + " * RuneNameResolver - 卢恩标识符运行时解析器\n"
+                + " * 映射数据由 native 层 (librunecore.so) 在 JNI_OnLoad 时注入。\n"
+                + " */\n"
+                + "public final class RuneNameResolver {\n"
+                + "    private static final String DATA_ASSET = \"rune_obf/rune_data.bin\";\n"
+                + "    private static volatile boolean initialized = false;\n"
+                + "    private static final java.util.Map<String,String> NAME_MAP = new java.util.HashMap<>();\n\n"
+                + "    public static void init(android.content.Context ctx) {\n"
+                + "        if (initialized) return;\n"
+                + "        // native 注入：librunecore.so 读取 assets/rune_obf/rune_data.bin\n"
+                + "        // 解密 XOR 盐后填充 NAME_MAP\n"
+                + "        nativeInitMapping(ctx);\n"
+                + "        initialized = true;\n"
+                + "    }\n\n"
+                + "    public static String resolve(String runeName) {\n"
+                + "        String orig = NAME_MAP.get(runeName);\n"
+                + "        return orig != null ? orig : runeName;\n"
+                + "    }\n\n"
+                + "    private static native void nativeInitMapping(android.content.Context ctx);\n"
+                + "}\n";
     }
 }

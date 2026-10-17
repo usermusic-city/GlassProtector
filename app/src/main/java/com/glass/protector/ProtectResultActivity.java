@@ -60,8 +60,7 @@ public class ProtectResultActivity extends AppCompatActivity {
         backBtn = findViewById(R.id.resultBackBtn);
 
         if (config != null) {
-            String engineName = config.getEngine() == ProtectConfig.Engine.DPT ?
-                    "DPT魔改加固（函数抽取壳）" : "Glass自研加固（DEX加密+混淆）";
+            String engineName = "Glass自研加固（DEX加密+混淆）";
             String levelName = config.getLevel() == ProtectConfig.Level.LOW ? "低强度" :
                     config.getLevel() == ProtectConfig.Level.HIGH ? "高强度" : "中强度";
             resultEngine.setText("加固引擎: " + engineName);

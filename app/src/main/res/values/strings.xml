@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">GlassProtector</string>
-    <string name="tab_dpt">DPT魔改加固</string>
-    <string name="tab_glass">自研Glass加固</string>
     <string name="select_apk">选择APK文件</string>
     <string name="no_apk_selected">未选择APK</string>
     <string name="protect_level">加固强度</string>
@@ -14,7 +12,6 @@
     <string name="protect_success">加固完成</string>
     <string name="protect_failed">加固失败</string>
     <string name="output_path">输出路径</string>
-    <string name="dpt_desc">基于dpt-shell函数抽取壳，掏空方法体运行时恢复</string>
     <string name="glass_desc">自研DEX加密+字符串混淆+反调试+签名校验</string>
     <string name="options">加固选项</string>
     <string name="opt_dex_encrypt">DEX加密</string>

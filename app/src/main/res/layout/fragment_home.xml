@@ -23,7 +23,7 @@
                 android:layout_height="wrap_content"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:paddingBottom="16dp">
+                android:paddingBottom="8dp">
 
                 <ImageView
                     android:layout_width="48dp"
@@ -42,22 +42,11 @@
                     android:letterSpacing="0.1" />
             </LinearLayout>
 
-            <com.google.android.material.tabs.TabLayout
-                android:id="@+id/homeTabLayout"
-                android:layout_width="match_parent"
-                android:layout_height="44dp"
-                android:layout_marginStart="16dp"
-                android:layout_marginEnd="16dp"
-                android:background="@drawable/glass_card_bg"
-                app:tabGravity="fill"
-                app:tabMode="fixed"
-                style="@style/GlassTabLayout" />
-
         </LinearLayout>
     </com.google.android.material.appbar.AppBarLayout>
 
-    <androidx.viewpager2.widget.ViewPager2
-        android:id="@+id/homeViewPager"
+    <FrameLayout
+        android:id="@+id/homeContent"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         app:layout_behavior="@string/appbar_scrolling_view_behavior" />

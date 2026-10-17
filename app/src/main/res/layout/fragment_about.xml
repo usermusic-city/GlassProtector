@@ -168,7 +168,7 @@
             android:layout_height="wrap_content"
             android:gravity="center"
             android:layout_marginBottom="16dp"
-            android:text="Based on dpt-shell (MIT License)\nGlassProtector © 2026"
+            android:text="GlassProtector © 2026"
             android:textColor="@color/glass_text_hint"
             android:textSize="11sp"
             android:lineSpacingExtra="2dp" />

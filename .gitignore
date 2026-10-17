@@ -5,11 +5,8 @@ app/build/
 shell-runtime/build/
 
 # CI 生成物（由 GitHub Actions 构建时生成，勿提交）
-app/src/main/assets/dpt_engine/
 app/src/main/assets/shell.dex
 
-# 本地参考用的 dpt-shell 副本（CI 自行 clone 固定 commit）
-dpt-shell/
 
 # Local config
 local.properties

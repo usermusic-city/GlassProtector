@@ -18,67 +18,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Install ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-
-      - name: Setup CMake 3.31.1
-        uses: jwlawson/actions-setup-cmake@v1
-        with:
-          cmake-version: '3.31.1'
-
-      - name: Install NDK
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" > /dev/null || true
-
-      # ============ 阶段 1：构建 dpt-shell 引擎（原版 + Android 运行时魔改） ============
-
-      - name: Clone dpt-shell (pinned commit)
-        run: |
-          git clone https://github.com/luoyesiqiu/dpt-shell dpt-shell
-          cd dpt-shell
-          git checkout 6a3c2bb
-          git submodule update --init --recursive
-
-      - name: Patch dpt-shell for Android runtime
-        run: python3 scripts/patch_dpt_for_android.py dpt-shell
-
-      - name: Build dpt processor jar + shell native libs
-        working-directory: dpt-shell
-        run: |
-          chmod +x gradlew
-          # 必须分两次调用：shell/build.gradle 的 afterAssembleCopy 钩子
-          # 依据 startParameter.taskNames[0] 精确匹配 "shell:assembleRelease"，
-          # 若同一命令行混入其他任务（如 :dpt:jar）则钩子不触发，executable/shell-files 不生成
-          ./gradlew :dpt:jar --no-daemon
-          ./gradlew shell:assembleRelease --no-daemon
-          ls -la executable/
-
-      # Android 8.0+ 禁止 DexClassLoader 加载 app 可写目录（files/cache）里的 dex。
-      # 业界标准解法（Tinker 同款）：dex 伪装成 .so 打进 jniLibs，
-      # 安装时由系统解压到 nativeLibraryDir（app 只读），从那里加载即合规。
-      - name: Convert dpt.jar to DEX (fake .so for nativeLibraryDir)
-        run: |
-          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          echo "using build-tools: $BT"
-          rm -rf app/src/main/jniLibs/arm64-v8a /tmp/dptdex
-          mkdir -p app/src/main/jniLibs/arm64-v8a /tmp/dptdex
-          "$BT/d8" --release --min-api 24 \
-            --output /tmp/dptdex \
-            dpt-shell/executable/dpt.jar
-          i=1
-          for f in /tmp/dptdex/classes*.dex; do
-            cp "$f" "app/src/main/jniLibs/arm64-v8a/libdptcore${i}.so"
-            i=$((i+1))
-          done
-          ls -la app/src/main/jniLibs/arm64-v8a/
-
-      - name: Copy shell-files into assets
-        run: |
-          mkdir -p app/src/main/assets/dpt_engine
-          rm -rf app/src/main/assets/dpt_engine/shell-files
-          cp -r dpt-shell/executable/shell-files app/src/main/assets/dpt_engine/
-          find app/src/main/assets/dpt_engine/shell-files -type f -printf "%p %s bytes\n"
-
-      # ============ 阶段 2：构建 Glass 壳 dex（shell-runtime） ============
+      # ============ 阶段 1：构建 Glass 壳 dex（shell-runtime） ============
 
       - name: Build shell-runtime DEX
         run: |
@@ -93,7 +33,7 @@ jobs:
           cd "$OLDPWD"
           ls -la app/src/main/assets/shell.dex
 
-      # ============ 阶段 3：构建 GlassProtector APK ============
+      # ============ 阶段 2：构建 GlassProtector APK ============
 
       - name: Build GlassProtector APK
         run: |

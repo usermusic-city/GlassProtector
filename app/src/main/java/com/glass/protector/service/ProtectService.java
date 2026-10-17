@@ -13,7 +13,6 @@ import androidx.core.app.NotificationCompat;
 import com.glass.protector.GlassApp;
 import com.glass.protector.MainActivity;
 import com.glass.protector.R;
-import com.glass.protector.util.DptProtector;
 import com.glass.protector.util.GlassProtectorEngine;
 
 import java.util.ArrayList;
@@ -64,14 +63,8 @@ public class ProtectService extends Service {
         updateNotification("正在初始化加固引擎...");
 
         try {
-            String output;
-            if (config.getEngine() == ProtectConfig.Engine.DPT) {
-                DptProtector engine = new DptProtector(config);
-                output = runWithLogPump(engine::getLogs, engine::protect);
-            } else {
-                GlassProtectorEngine engine = new GlassProtectorEngine(config);
-                output = runWithLogPump(engine::getLogs, engine::protect);
-            }
+            GlassProtectorEngine engine = new GlassProtectorEngine(config);
+            String output = runWithLogPump(engine::getLogs, engine::protect);
 
             ProtectState.elapsedMs = SystemClock.elapsedRealtime() - start;
             ProtectState.finishSuccess(output);
@@ -155,8 +148,7 @@ public class ProtectService extends Service {
             outputPath = null;
             errorMsg = null;
             elapsedMs = 0;
-            appendLog("[*] 加固任务已启动，引擎: " +
-                    (cfg.getEngine() == ProtectConfig.Engine.DPT ? "DPT" : "Glass"));
+            appendLog("[*] 加固任务已启动，引擎: Glass");
         }
 
         public static void appendLog(String line) {

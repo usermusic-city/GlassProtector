@@ -107,7 +107,7 @@ public class GlassProtectorEngine {
         File keyStoreFile = extractAsset(KEYSTORE_ASSET, new File(workDir, KEYSTORE_ASSET));
 
         // 1. 解析 manifest
-        log("[1/7] 解析 AndroidManifest.xml ...");
+        log("[1/8] 解析 AndroidManifest.xml ...");
         byte[] manifestData = readZipEntry(input, "AndroidManifest.xml");
         File manifestIn = new File(workDir, "AndroidManifest.xml");
         writeBytes(manifestIn, manifestData);
@@ -115,12 +115,12 @@ public class GlassProtectorEngine {
         String acf = getManifestAttr(manifestData, "application", "appComponentFactory");
         if (acf != null && !acf.isEmpty() && !"androidx.core.app.CoreComponentFactory".equals(acf)) {
             throw new Exception("原 APK 使用了自定义 appComponentFactory(" + acf
-                    + ")，Glass 引擎暂不支持，请改用 DPT 引擎");
+                    + ")，Glass 引擎暂不支持该配置");
         }
         log("  原 Application: " + (origApp == null ? "(无，使用默认)" : origApp));
 
         // 2. 生成 AES 密钥并加密全部 DEX（流式落盘，不整块进内存）
-        log("[2/7] AES 加密 DEX ...");
+        log("[2/8] AES 加密 DEX ...");
         byte[] aesKey = new byte[16];
         new SecureRandom().nextBytes(aesKey);
         List<String> dexNames = listDexEntries(input);
@@ -139,7 +139,7 @@ public class GlassProtectorEngine {
         log("  共加密 " + encDexes.size() + " 个 DEX，合计 " + (totalDexBytes / 1024) + " KB");
 
         // 3. 生成壳配置
-        log("[3/7] 生成壳配置 ...");
+        log("[3/8] 生成壳配置 ...");
         String signSha256 = certSha256(keyStoreFile);
         JSONObject cfg = new JSONObject();
         cfg.put("origApp", origApp == null ? "" : origApp);
@@ -149,8 +149,37 @@ public class GlassProtectorEngine {
         cfg.put("antiFrida", config.isGlassAntiDebug());
         byte[] cfgEnc = buildConfigBlob(aesKey, cfg);
 
-        // 4. 编辑 manifest：application name → 壳，extractNativeLibs=true
-        log("[4/7] 改写 manifest（壳入口接管）...");
+        // 4. 卢恩字符混淆（若开启）
+        List<RuneObfuscator.RuneFile> runeFiles = null;
+        if (config.isRuneObfuscateEnabled()) {
+            log("[4/8] 卢恩字符混淆（扫描 DEX 标识符 + manifest 组件）...");
+            try {
+                RuneObfuscator.RuneProduct rp = RuneObfuscator.processApk(
+                        input, config.isRuneObfuscateClass(), config.isRuneObfuscateMethod(),
+                        config.isRuneObfuscatePackage(), logs);
+                runeFiles = rp.files;
+                cfg.put("runeObf", true);
+                cfg.put("runeClasses", rp.mappedClasses);
+                cfg.put("runeMethods", rp.mappedMethods);
+                cfg.put("runePackages", rp.mappedPackages);
+                log("  映射 " + rp.mappedClasses + " 类 / " + rp.mappedMethods
+                        + " 方法 / " + rp.mappedPackages + " 包 → assets/rune_obf/");
+                log("  产物: rune_map.txt (ProGuard 风格) + rune_data.bin (XOR 混淆) + resolver.java");
+                if (!rp.samples.isEmpty()) {
+                    log("  对照样例:");
+                    for (String[] s : rp.samples) {
+                        log("    " + s[0] + " -> " + s[1]);
+                    }
+                }
+            } catch (Exception e) {
+                log("  [warn] 卢恩混淆失败: " + e.getMessage() + "，跳过");
+            }
+        } else {
+            log("[4/8] 卢恩混淆: 关闭");
+        }
+
+        // 5. 编辑 manifest：application name → 壳，extractNativeLibs=true
+        log("[5/8] 改写 manifest（壳入口接管）...");
         File manifestOut = new File(workDir, "AndroidManifest_new.xml");
         ModificationProperty property = new ModificationProperty();
         property.addApplicationAttribute(new AttributeItem(NodeValue.Application.NAME, SHELL_APP_NAME));
@@ -159,19 +188,19 @@ public class GlassProtectorEngine {
                 manifestOut.getAbsolutePath(), property);
         byte[] newManifest = readFile(manifestOut);
 
-        // 5. 重打包
-        log("[5/7] 重打包 APK ...");
-        rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes);
+        // 6. 重打包
+        log("[6/8] 重打包 APK ...");
+        rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes, runeFiles);
 
-        // 6. zipalign
-        log("[6/7] zipalign 对齐 ...");
+        // 7. zipalign
+        log("[7/8] zipalign 对齐 ...");
         try (RandomAccessFile raf = new RandomAccessFile(unsignedApk, "r");
              OutputStream os = new BufferedOutputStream(new FileOutputStream(alignedApk))) {
             com.iyxan23.zipalignjava.ZipAlign.alignZip(raf, os);
         }
 
-        // 7. apksigner 签名（v1+v2）
-        log("[7/7] apksigner 重签名 (v1+v2) ...");
+        // 8. apksigner 签名（v1+v2）
+        log("[8/8] apksigner 重签名 (v1+v2) ...");
         signApk(alignedApk, keyStoreFile, outApk);
 
         // 清理工作目录
@@ -232,7 +261,8 @@ public class GlassProtectorEngine {
      * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX 与加密 DEX。
      */
     private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
-                            byte[] configBlob, List<EncDex> encDexes) throws Exception {
+                            byte[] configBlob, List<EncDex> encDexes,
+                            List<RuneObfuscator.RuneFile> runeFiles) throws Exception {
         try (ZipFile zip = new ZipFile(input);
              ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
 
@@ -245,6 +275,7 @@ public class GlassProtectorEngine {
                 if (name.startsWith("META-INF/")
                         && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA")
                         || name.endsWith(".EC") || name.endsWith(".MF"))) continue;       // 旧签名
+                if (name.startsWith("assets/rune_obf/")) continue;                       // 清旧 rune 产物
 
                 copyEntry(zip, zos, e);
             }
@@ -260,6 +291,12 @@ public class GlassProtectorEngine {
                 EncDex d = encDexes.get(i);
                 putFileEntry(zos, String.format(Locale.US, "assets/" + DEX_ASSET_FORMAT, i),
                         d.file, d.size, d.crc);
+            }
+            // 卢恩混淆产物
+            if (runeFiles != null) {
+                for (RuneObfuscator.RuneFile rf : runeFiles) {
+                    putEntry(zos, rf.assetPath, rf.data, ZipEntry.DEFLATED);
+                }
             }
         }
     }

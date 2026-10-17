@@ -86,7 +86,6 @@ public class GlassProtectFragment extends Fragment {
 
         levelGroup.setOnCheckedChangeListener((group, checkedId) -> {
             ProtectConfig config = new ProtectConfig();
-            config.setEngine(ProtectConfig.Engine.GLASS);
             if (checkedId == R.id.glass_levelLow) {
                 config.setLevel(ProtectConfig.Level.LOW);
             } else if (checkedId == R.id.glass_levelHigh) {
@@ -132,7 +131,6 @@ public class GlassProtectFragment extends Fragment {
         }
 
         ProtectConfig config = new ProtectConfig();
-        config.setEngine(ProtectConfig.Engine.GLASS);
         config.setInputApkPath(selectedApkPath);
         config.setOutputDir(Environment.getExternalStorageDirectory() + "/GlassProtector/output");
 
