@@ -272,7 +272,8 @@ public class SettingsFragment extends Fragment {
             for (File f : outFiles) {
                 if (f.isDirectory() && f.getName().startsWith("glass_work_")) {
                     targets.add(f);
-                } else if (f.isFile() && f.getName().endsWith("_glass_protected.apk")) {
+                } else if (f.isFile()
+                        && f.getName().matches(".*_glass_protected(\\(\\d+\\))?\\.apk")) {
                     targets.add(f);
                 }
             }

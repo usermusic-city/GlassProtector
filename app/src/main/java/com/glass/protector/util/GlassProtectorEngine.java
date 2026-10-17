@@ -111,7 +111,7 @@ public class GlassProtectorEngine {
         File unsignedApk = new File(workDir, "unsigned.apk");
         File alignedApk = new File(workDir, "aligned.apk");
         String outName = input.getName().replace(".apk", "") + "_glass_protected.apk";
-        File outApk = new File(outDir, outName);
+        File outApk = uniqueFile(new File(outDir, outName));
 
         // 0. 壳 dex 与 keystore 从本 APP assets 释放；用户配置了自定义签名秘钥则优先使用
         File shellDex = extractAsset(SHELL_DEX_ASSET, new File(workDir, SHELL_DEX_ASSET));
@@ -695,6 +695,22 @@ public class GlassProtectorEngine {
     }
 
     /** 计算 keystore 证书 SHA-256（冒号分隔大写 hex），壳运行时用它做签名校验 */
+    /**
+     * 目标文件已存在时追加序号：name.apk → name(1).apk → name(2).apk …
+     * 避免同目录同名产物被覆盖。
+     */
+    private static File uniqueFile(File target) {
+        if (!target.exists()) return target;
+        String path = target.getAbsolutePath();
+        int dot = path.lastIndexOf('.');
+        String base = dot < 0 ? path : path.substring(0, dot);
+        String ext = dot < 0 ? "" : path.substring(dot);
+        for (int i = 1; ; i++) {
+            File cand = new File(base + "(" + i + ")" + ext);
+            if (!cand.exists()) return cand;
+        }
+    }
+
     private static String certSha256(File keyStore, String storePass, String alias) throws Exception {
         KeyStore ks = KeyStore.getInstance(KeyStoreUtils.detectType(keyStore.getAbsolutePath()).getType());
         try (InputStream in = new FileInputStream(keyStore)) {
