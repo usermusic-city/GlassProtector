@@ -70,6 +70,48 @@ public class KeyStoreUtils {
     }
 
     /**
+     * 完整校验签名秘钥四要素（文件 / 秘钥库密码 / 别名 / 别名密码）。
+     *
+     * @return null = 校验全部通过；否则返回可直接展示给用户的中文错误信息
+     */
+    public static String verifyKeystore(String keystorePath, String storePass,
+                                        String alias, String aliasPass)
+            throws java.security.KeyStoreException {
+        if (keystorePath == null || !new File(keystorePath).exists()) {
+            return "秘钥文件不存在，请先导入";
+        }
+        KeyStoreType type = detectType(keystorePath);
+        KeyStore ks;
+        try {
+            ks = loadKeyStore(keystorePath, storePass, type);
+        } catch (Exception e) {
+            // JKS 密码错误抛 IOException("Keystore was tampered with, or password was incorrect")
+            return "秘钥库密码错误（" + type.getType() + " 格式）";
+        }
+        if (alias == null || alias.isEmpty()) {
+            return "请填写密钥别名 (Alias)";
+        }
+        if (!ks.isKeyEntry(alias)) {
+            String avail = String.join(", ", getAliases(keystorePath, storePass, type));
+            return "别名 \"" + alias + "\" 不存在或不含私钥"
+                    + (avail.isEmpty() ? "" : "\n可用别名: " + avail);
+        }
+        // 别名密码：未单独填写时回退用秘钥库密码（PKCS12/JKS 常见两者相同）
+        String keyPass = (aliasPass == null || aliasPass.isEmpty()) ? storePass : aliasPass;
+        try {
+            PrivateKey key = (PrivateKey) ks.getKey(alias, keyPass.toCharArray());
+            if (key == null) {
+                return "别名密码错误（该别名需要单独的 Key Password）";
+            }
+        } catch (java.security.UnrecoverableKeyException e) {
+            return "别名密码错误（该别名需要单独的 Key Password）";
+        } catch (Exception e) {
+            return "读取私钥失败: " + e.getMessage();
+        }
+        return null; // 全部通过
+    }
+
+    /**
      * 获取秘钥库中的所有别名
      */
     public static String[] getAliases(String keystorePath, String password, KeyStoreType type) {

@@ -132,6 +132,50 @@
                         android:textSize="14sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
+                <!-- 别名密码输入（与秘钥密码相同时可不填） -->
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/keystoreAliasPassLayout"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:hint="别名密码 (Key Password，与秘钥密码相同可不填)"
+                    android:textColorHint="@color/glass_text_hint"
+                    app:boxBackgroundMode="outline"
+                    app:boxStrokeColor="@color/glass_card_border"
+                    app:hintTextColor="@color/glass_text_hint">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/keystoreAliasPassEdit"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="textPassword"
+                        android:textColor="@color/glass_text_primary"
+                        android:textSize="14sp" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <!-- 校验按钮 -->
+                <Button
+                    android:id="@+id/verifyKeystoreBtn"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/glass_button_bg"
+                    android:text="校验秘钥"
+                    android:textColor="@color/glass_text_primary"
+                    android:textSize="14sp"
+                    android:stateListAnimator="@null" />
+
+                <!-- 校验结果 -->
+                <TextView
+                    android:id="@+id/keystoreVerifyText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:layout_marginBottom="4dp"
+                    android:textSize="13sp"
+                    android:lineSpacingExtra="3dp"
+                    android:visibility="gone" />
+
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 

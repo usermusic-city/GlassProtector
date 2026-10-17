@@ -17,6 +17,12 @@ public class ProtectConfig implements Serializable {
     private String inputApkPath;
     private String outputDir;
 
+    // 自定义签名秘钥（为空时使用内置 glass.p12）
+    private String keystorePath;     // 秘钥文件路径 (.jks/.bks/.p12/.pfx/.keystore)
+    private String keystorePass;     // 秘钥库密码 (Keystore Password)
+    private String keystoreAlias;    // 密钥别名 (Alias)
+    private String keystoreAliasPass; // 别名密码 (Key Password，与秘钥库密码相同时可不填)
+
     // Glass加固选项
     private boolean dexEncrypt = true;         // DEX加密
     private boolean glassStringEncrypt = true; // 字符串加密
@@ -98,6 +104,20 @@ public class ProtectConfig implements Serializable {
 
     public String getOutputDir() { return outputDir; }
     public void setOutputDir(String outputDir) { this.outputDir = outputDir; }
+
+    public String getKeystorePath() { return keystorePath; }
+    public void setKeystorePath(String keystorePath) { this.keystorePath = keystorePath; }
+    public String getKeystorePass() { return keystorePass; }
+    public void setKeystorePass(String keystorePass) { this.keystorePass = keystorePass; }
+    public String getKeystoreAlias() { return keystoreAlias; }
+    public void setKeystoreAlias(String keystoreAlias) { this.keystoreAlias = keystoreAlias; }
+    public String getKeystoreAliasPass() { return keystoreAliasPass; }
+    public void setKeystoreAliasPass(String keystoreAliasPass) { this.keystoreAliasPass = keystoreAliasPass; }
+
+    /** 用户是否配置了自定义签名秘钥（路径非空且文件存在） */
+    public boolean hasCustomKeystore() {
+        return keystorePath != null && !keystorePath.isEmpty() && new java.io.File(keystorePath).exists();
+    }
 
     public boolean isDexEncrypt() { return dexEncrypt; }
     public void setDexEncrypt(boolean dexEncrypt) { this.dexEncrypt = dexEncrypt; }

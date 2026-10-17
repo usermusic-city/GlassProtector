@@ -38,15 +38,16 @@ public class SettingsFragment extends Fragment {
     private static final String KEY_KEYSTORE_PATH = "keystore_path";
     private static final String KEY_KEYSTORE_PASS = "keystore_pass";
     private static final String KEY_KEYSTORE_ALIAS = "keystore_alias";
+    private static final String KEY_KEYSTORE_ALIAS_PASS = "keystore_alias_pass";
     private static final String KEY_OUTPUT_DIR = "output_dir";
     private static final String KEY_AUTO_SIGN = "auto_sign";
     private static final String KEY_KEEP_ORIGINAL = "keep_original";
     private static final String KEY_SHOW_LOG = "show_log";
 
     private LinearLayout keystoreInfoLayout;
-    private TextView keystoreFileName, keystoreAliasText, outputDirText, cacheSizeText;
-    private TextInputEditText keystorePassEdit, keystoreAliasEdit;
-    private Button importKeystoreBtn, resetOutputDirBtn, chooseOutputDirBtn, cleanCacheBtn;
+    private TextView keystoreFileName, keystoreAliasText, outputDirText, cacheSizeText, keystoreVerifyText;
+    private TextInputEditText keystorePassEdit, keystoreAliasEdit, keystoreAliasPassEdit;
+    private Button importKeystoreBtn, resetOutputDirBtn, chooseOutputDirBtn, cleanCacheBtn, verifyKeystoreBtn;
     private SwitchMaterial autoSignSwitch, keepOriginalSwitch, showLogSwitch;
 
     private SharedPreferences prefs;
@@ -102,6 +103,10 @@ public class SettingsFragment extends Fragment {
         outputDirText = view.findViewById(R.id.outputDirText);
         keystorePassEdit = view.findViewById(R.id.keystorePassEdit);
         keystoreAliasEdit = view.findViewById(R.id.keystoreAliasEdit);
+        keystoreAliasPassEdit = view.findViewById(R.id.keystoreAliasPassEdit);
+        keystoreVerifyText = view.findViewById(R.id.keystoreVerifyText);
+        verifyKeystoreBtn = view.findViewById(R.id.verifyKeystoreBtn);
+        keystoreVerifyText.setVisibility(View.GONE);
         importKeystoreBtn = view.findViewById(R.id.importKeystoreBtn);
         resetOutputDirBtn = view.findViewById(R.id.resetOutputDirBtn);
         chooseOutputDirBtn = view.findViewById(R.id.chooseOutputDirBtn);
@@ -150,6 +155,16 @@ public class SettingsFragment extends Fragment {
             }
         });
 
+        keystoreAliasPassEdit.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) {
+                prefs.edit().putString(KEY_KEYSTORE_ALIAS_PASS,
+                        keystoreAliasPassEdit.getText().toString()).apply();
+            }
+        });
+
+        // 校验秘钥：文件 / 秘钥库密码 / 别名 / 别名密码 四要素逐项验证
+        verifyKeystoreBtn.setOnClickListener(v -> verifyKeystore());
+
         autoSignSwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
                 prefs.edit().putBoolean(KEY_AUTO_SIGN, isChecked).apply());
         keepOriginalSwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
@@ -162,14 +177,68 @@ public class SettingsFragment extends Fragment {
         keystorePath = prefs.getString(KEY_KEYSTORE_PATH, null);
         String pass = prefs.getString(KEY_KEYSTORE_PASS, "");
         String alias = prefs.getString(KEY_KEYSTORE_ALIAS, "");
+        String aliasPass = prefs.getString(KEY_KEYSTORE_ALIAS_PASS, "");
         keystorePassEdit.setText(pass);
         keystoreAliasEdit.setText(alias);
+        keystoreAliasPassEdit.setText(aliasPass);
         updateKeystoreInfo();
         updateOutputDir();
         autoSignSwitch.setChecked(prefs.getBoolean(KEY_AUTO_SIGN, true));
         keepOriginalSwitch.setChecked(prefs.getBoolean(KEY_KEEP_ORIGINAL, true));
         showLogSwitch.setChecked(prefs.getBoolean(KEY_SHOW_LOG, false));
         updateCacheInfo();
+    }
+
+    // ==================== 秘钥配置与校验 ====================
+
+    /** 供加固流程调用：把用户配置的自定义签名秘钥注入 config（未配置/文件丢失则保持默认内置秘钥） */
+    public static void applyKeystoreConfig(Context ctx, com.glass.protector.service.ProtectConfig config) {
+        SharedPreferences p = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String path = p.getString(KEY_KEYSTORE_PATH, null);
+        if (path == null || path.isEmpty() || !new File(path).exists()) {
+            return; // 用引擎内置 glass.p12
+        }
+        config.setKeystorePath(path);
+        config.setKeystorePass(p.getString(KEY_KEYSTORE_PASS, ""));
+        config.setKeystoreAlias(p.getString(KEY_KEYSTORE_ALIAS, ""));
+        config.setKeystoreAliasPass(p.getString(KEY_KEYSTORE_ALIAS_PASS, ""));
+    }
+
+    /** 校验按钮：四要素逐项验证，结果显示在按钮下方 */
+    private void verifyKeystore() {
+        // 先落盘当前输入框内容
+        prefs.edit()
+                .putString(KEY_KEYSTORE_PASS, keystorePassEdit.getText().toString())
+                .putString(KEY_KEYSTORE_ALIAS, keystoreAliasEdit.getText().toString())
+                .putString(KEY_KEYSTORE_ALIAS_PASS, keystoreAliasPassEdit.getText().toString())
+                .apply();
+
+        if (keystorePath == null || !new File(keystorePath).exists()) {
+            showVerifyResult(false, "未导入秘钥文件");
+            return;
+        }
+        String err;
+        try {
+            err = com.glass.protector.util.KeyStoreUtils.verifyKeystore(
+                    keystorePath,
+                    keystorePassEdit.getText().toString(),
+                    keystoreAliasEdit.getText().toString(),
+                    keystoreAliasPassEdit.getText().toString());
+        } catch (Exception e) {
+            err = "校验异常: " + e.getMessage();
+        }
+        if (err == null) {
+            String alias = keystoreAliasEdit.getText().toString();
+            showVerifyResult(true, "秘钥校验通过，签名将使用别名 " + alias);
+        } else {
+            showVerifyResult(false, err);
+        }
+    }
+
+    private void showVerifyResult(boolean ok, String msg) {
+        keystoreVerifyText.setVisibility(View.VISIBLE);
+        keystoreVerifyText.setText((ok ? "✓ " : "✗ ") + msg);
+        keystoreVerifyText.setTextColor(ok ? 0xFF4CAF50 : 0xFFF44336);
     }
 
     // ==================== 缓存清理 ====================

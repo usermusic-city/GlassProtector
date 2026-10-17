@@ -156,6 +156,9 @@ public class GlassProtectFragment extends Fragment {
         // 使用设置中配置的导出目录
         config.setOutputDir(SettingsFragment.getOutputDir(requireContext()));
 
+        // 使用设置中配置的自定义签名秘钥（未配置或文件不存在时引擎自动用内置秘钥）
+        SettingsFragment.applyKeystoreConfig(requireContext(), config);
+
         Intent serviceIntent = new Intent(requireContext(), ProtectService.class);
         serviceIntent.putExtra(ProtectService.EXTRA_CONFIG, config);
         androidx.core.content.ContextCompat.startForegroundService(requireContext(), serviceIntent);

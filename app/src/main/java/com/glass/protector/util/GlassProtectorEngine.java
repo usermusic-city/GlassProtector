@@ -113,9 +113,30 @@ public class GlassProtectorEngine {
         String outName = input.getName().replace(".apk", "") + "_glass_protected.apk";
         File outApk = new File(outDir, outName);
 
-        // 0. 壳 dex 与 keystore 从本 APP assets 释放
+        // 0. 壳 dex 与 keystore 从本 APP assets 释放；用户配置了自定义签名秘钥则优先使用
         File shellDex = extractAsset(SHELL_DEX_ASSET, new File(workDir, SHELL_DEX_ASSET));
-        File keyStoreFile = extractAsset(KEYSTORE_ASSET, new File(workDir, KEYSTORE_ASSET));
+        File keyStoreFile;
+        String signStorePass, signAlias, signKeyPass;
+        if (config.hasCustomKeystore()) {
+            keyStoreFile = new File(config.getKeystorePath());
+            signStorePass = config.getKeystorePass() == null ? "" : config.getKeystorePass();
+            signAlias = config.getKeystoreAlias() == null ? "" : config.getKeystoreAlias();
+            // 别名密码未单独填写时回退秘钥库密码（PKCS12/JKS 常见两者相同）
+            signKeyPass = (config.getKeystoreAliasPass() == null || config.getKeystoreAliasPass().isEmpty())
+                    ? signStorePass : config.getKeystoreAliasPass();
+            String vErr = KeyStoreUtils.verifyKeystore(keyStoreFile.getAbsolutePath(),
+                    signStorePass, signAlias, signKeyPass);
+            if (vErr != null) {
+                throw new Exception("自定义签名秘钥校验失败：" + vErr);
+            }
+            log("  签名秘钥: 自定义 " + keyStoreFile.getName() + "（alias=" + signAlias + "）");
+        } else {
+            keyStoreFile = extractAsset(KEYSTORE_ASSET, new File(workDir, KEYSTORE_ASSET));
+            signStorePass = KEYSTORE_PASSWORD;
+            signAlias = KEYSTORE_ALIAS;
+            signKeyPass = KEYSTORE_PASSWORD;
+            log("  签名秘钥: 内置默认秘钥（可在设置页配置自定义秘钥）");
+        }
 
         // 1. 解析 manifest
         log("[1/8] 解析 AndroidManifest.xml ...");
@@ -158,7 +179,7 @@ public class GlassProtectorEngine {
 
         // 3. 壳配置字段（JSON 统一在卢恩步骤之后序列化，避免字段丢失）
         log("[3/8] 生成壳配置 ...");
-        String signSha256 = certSha256(keyStoreFile);
+        String signSha256 = certSha256(keyStoreFile, signStorePass, signAlias);
         JSONObject cfg = new JSONObject();
         cfg.put("origApp", origApp == null ? "" : origApp);
         cfg.put("origFactory", hasAcf ? acf : "");
@@ -291,7 +312,7 @@ public class GlassProtectorEngine {
 
         // 8. apksigner 签名（v1+v2）
         log("[8/8] apksigner 重签名 (v1+v2) ...");
-        signApk(alignedApk, keyStoreFile, outApk);
+        signApk(alignedApk, keyStoreFile, outApk, signStorePass, signAlias, signKeyPass);
 
         // 清理工作目录
         deleteRecursive(workDir);
@@ -643,20 +664,21 @@ public class GlassProtectorEngine {
 
     // ---------------- 签名 ----------------
 
-    private void signApk(File in, File keyStore, File out) throws Exception {
-        // 从 PKCS12 提取私钥与证书
-        KeyStore ks = KeyStore.getInstance("PKCS12");
+    private void signApk(File in, File keyStore, File out,
+                         String storePass, String alias, String keyPass) throws Exception {
+        // 按文件格式加载 keystore（自定义秘钥可能是 .jks/.bks/.p12/.pfx）
+        KeyStore ks = KeyStore.getInstance(KeyStoreUtils.detectType(keyStore.getAbsolutePath()).getType());
         try (InputStream kin = new FileInputStream(keyStore)) {
-            ks.load(kin, KEYSTORE_PASSWORD.toCharArray());
+            ks.load(kin, storePass.toCharArray());
         }
-        PrivateKey key = (PrivateKey) ks.getKey(KEYSTORE_ALIAS, KEYSTORE_PASSWORD.toCharArray());
+        PrivateKey key = (PrivateKey) ks.getKey(alias, keyPass.toCharArray());
         java.security.cert.X509Certificate cert =
-                (java.security.cert.X509Certificate) ks.getCertificate(KEYSTORE_ALIAS);
+                (java.security.cert.X509Certificate) ks.getCertificate(alias);
         if (key == null || cert == null) {
-            throw new Exception("keystore 中没有别名 " + KEYSTORE_ALIAS + " 的签名密钥");
+            throw new Exception("keystore 中没有别名 " + alias + " 的签名密钥");
         }
         ApkSigner.SignerConfig signerConfig = new ApkSigner.SignerConfig.Builder(
-                KEYSTORE_ALIAS, key, java.util.Collections.singletonList(cert)).build();
+                alias, key, java.util.Collections.singletonList(cert)).build();
         // 直接走 apksig 库 API。不能调 ApkSignerTool.main()：CLI 失败路径会 System.exit
         // 直接杀死本加固进程（表现为加固过程中闪退、无失败提示）。
         ApkSigner signer = new ApkSigner.Builder(java.util.Collections.singletonList(signerConfig))
@@ -673,14 +695,14 @@ public class GlassProtectorEngine {
     }
 
     /** 计算 keystore 证书 SHA-256（冒号分隔大写 hex），壳运行时用它做签名校验 */
-    private static String certSha256(File p12) throws Exception {
-        KeyStore ks = KeyStore.getInstance("PKCS12");
-        try (InputStream in = new FileInputStream(p12)) {
-            ks.load(in, KEYSTORE_PASSWORD.toCharArray());
+    private static String certSha256(File keyStore, String storePass, String alias) throws Exception {
+        KeyStore ks = KeyStore.getInstance(KeyStoreUtils.detectType(keyStore.getAbsolutePath()).getType());
+        try (InputStream in = new FileInputStream(keyStore)) {
+            ks.load(in, storePass.toCharArray());
         }
-        java.security.cert.Certificate cert = ks.getCertificate(KEYSTORE_ALIAS);
+        java.security.cert.Certificate cert = ks.getCertificate(alias);
         if (cert == null) {
-            throw new Exception("keystore 中没有别名 " + KEYSTORE_ALIAS);
+            throw new Exception("keystore 中没有别名 " + alias);
         }
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         byte[] digest = md.digest(cert.getEncoded());
