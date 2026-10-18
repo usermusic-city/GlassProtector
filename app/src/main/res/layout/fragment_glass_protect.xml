@@ -300,6 +300,18 @@
                     android:checked="false"
                     app:thumbTint="@color/glass_primary"
                     app:trackTint="@color/glass_card_border" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/glass_optControlFlow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/opt_control_flow"
+                    android:textColor="@color/glass_text_primary"
+                    android:textSize="13sp"
+                    android:checked="false"
+                    app:thumbTint="@color/glass_primary"
+                    app:trackTint="@color/glass_card_border" />
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 

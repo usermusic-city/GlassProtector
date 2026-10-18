@@ -36,7 +36,7 @@ public class GlassProtectFragment extends Fragment {
     private Button selectApkBtn, startProtectBtn;
     private RadioGroup levelGroup;
     private SwitchMaterial optDexEncrypt, optStringEncrypt, optAntiDebug, optSignVerify,
-            optResourceObfuscate, optJunkCode;
+            optResourceObfuscate, optJunkCode, optControlFlow;
 
     private String selectedApkPath;
 
@@ -75,6 +75,7 @@ public class GlassProtectFragment extends Fragment {
         optSignVerify = view.findViewById(R.id.glass_optSignVerify);
         optResourceObfuscate = view.findViewById(R.id.glass_optResourceObfuscate);
         optJunkCode = view.findViewById(R.id.glass_optJunkCode);
+        optControlFlow = view.findViewById(R.id.glass_optControlFlow);
     }
 
     private void setupListeners() {
@@ -96,6 +97,7 @@ public class GlassProtectFragment extends Fragment {
             optSignVerify.setChecked(config.isGlassSignVerify());
             optResourceObfuscate.setChecked(config.isResourceObfuscate());
             optJunkCode.setChecked(config.isGlassJunkCode());
+            optControlFlow.setChecked(config.isControlFlowObfuscate());
         });
 
         startProtectBtn.setOnClickListener(v -> startProtect());
@@ -142,6 +144,7 @@ public class GlassProtectFragment extends Fragment {
         config.setGlassSignVerify(optSignVerify.isChecked());
         config.setResourceObfuscate(optResourceObfuscate.isChecked());
         config.setGlassJunkCode(optJunkCode.isChecked());
+        config.setControlFlowObfuscate(optControlFlow.isChecked());
 
         // 使用设置中配置的导出目录
         config.setOutputDir(SettingsFragment.getOutputDir(requireContext()));

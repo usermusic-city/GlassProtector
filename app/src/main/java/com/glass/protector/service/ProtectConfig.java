@@ -30,6 +30,7 @@ public class ProtectConfig implements Serializable {
     private boolean glassSignVerify = true;    // 签名校验
     private boolean resourceObfuscate = false; // 资源混淆
     private boolean glassJunkCode = false;     // 垃圾代码
+    private boolean controlFlowObfuscate = false; // 控制流混淆（dexlib2 指令流改写）
 
     public ProtectConfig() {
         this.level = Level.MEDIUM;
@@ -45,6 +46,7 @@ public class ProtectConfig implements Serializable {
                 glassSignVerify = false;
                 resourceObfuscate = false;
                 glassJunkCode = false;
+                controlFlowObfuscate = false;
                 break;
             case MEDIUM:
                 dexEncrypt = true;
@@ -53,6 +55,7 @@ public class ProtectConfig implements Serializable {
                 glassSignVerify = true;
                 resourceObfuscate = false;
                 glassJunkCode = false;
+                controlFlowObfuscate = false;
                 break;
             case HIGH:
                 dexEncrypt = true;
@@ -61,6 +64,7 @@ public class ProtectConfig implements Serializable {
                 glassSignVerify = true;
                 resourceObfuscate = true;
                 glassJunkCode = true;
+                controlFlowObfuscate = true;
                 break;
         }
     }
@@ -106,4 +110,7 @@ public class ProtectConfig implements Serializable {
 
     public boolean isGlassJunkCode() { return glassJunkCode; }
     public void setGlassJunkCode(boolean glassJunkCode) { this.glassJunkCode = glassJunkCode; }
+
+    public boolean isControlFlowObfuscate() { return controlFlowObfuscate; }
+    public void setControlFlowObfuscate(boolean controlFlowObfuscate) { this.controlFlowObfuscate = controlFlowObfuscate; }
 }

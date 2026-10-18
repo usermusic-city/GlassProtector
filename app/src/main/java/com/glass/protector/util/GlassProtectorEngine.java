@@ -163,12 +163,31 @@ public class GlassProtectorEngine {
         }
         List<EncDex> encDexes = new ArrayList<>();
         long totalDexBytes = 0;
+        boolean cfo = config.isControlFlowObfuscate();
+        long cfoSeed = System.currentTimeMillis();
         for (int i = 0; i < dexNames.size(); i++) {
             String dexName = dexNames.get(i);
+            // 提取原 DEX 到临时文件（流式）
+            File rawDex = new File(workDir, "raw_" + i + ".dex");
+            extractDexToFile(input, dexName, rawDex);
+            // 控制流混淆：在 DEX 加密/复制之前改写指令流
+            File obfDex = rawDex;
+            if (cfo) {
+                obfDex = new File(workDir, "obf_" + i + ".dex");
+                try {
+                    ControlFlowObfuscator.obfuscate(rawDex, obfDex, cfoSeed + i);
+                    log("  [控制流混淆] " + dexName + " 指令流已改写（" + (obfDex.length() / 1024)
+                            + " KB）");
+                } catch (Throwable t) {
+                    log("  [控制流混淆][warn] " + dexName + " 混淆失败，回退明文原 DEX："
+                            + t.getMessage());
+                    obfDex = rawDex;
+                }
+            }
             File encFile = new File(workDir, "payload_" + i + (dexEnc ? ".enc" : ".bin"));
             EncDex info = dexEnc
-                    ? encryptDexToFile(input, dexName, aesKey, encFile)
-                    : copyDexToFile(input, dexName, encFile);
+                    ? encryptFileToFile(obfDex, aesKey, encFile)
+                    : copyFileToFile(obfDex, encFile);
             info.assetName = dexAssetName(i, config.isGlassStringEncrypt(), dexEnc);
             info.sha256 = sha256File(encFile);
             encDexes.add(info);
@@ -498,6 +517,48 @@ public class GlassProtectorEngine {
             }
         }
         return new EncDex(out, out.length(), crc.getValue(), origSize);
+    }
+
+    /** 提取原 APK 中的单个 DEX 到独立文件（流式，供控制流混淆等改写前预处理） */
+    private static void extractDexToFile(File apk, String dexName, File out) throws Exception {
+        try (ZipFile zip = new ZipFile(apk)) {
+            ZipEntry e = zip.getEntry(dexName);
+            if (e == null) {
+                throw new Exception("APK 中缺少条目 " + dexName);
+            }
+            try (InputStream in = new BufferedInputStream(zip.getInputStream(e));
+                 OutputStream os = new BufferedOutputStream(new FileOutputStream(out))) {
+                transfer(in, os);
+            }
+        }
+    }
+
+    /** 明文模式：文件 → 落盘文件（流式复制 + CRC32 记录） */
+    private static EncDex copyFileToFile(File src, File out) throws Exception {
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        try (InputStream in = new BufferedInputStream(new FileInputStream(src));
+             java.util.zip.CheckedOutputStream cos = new java.util.zip.CheckedOutputStream(
+                     new BufferedOutputStream(new FileOutputStream(out)), crc)) {
+            transfer(in, cos);
+        }
+        return new EncDex(out, out.length(), crc.getValue(), src.length());
+    }
+
+    /**
+     * 加密模式：文件 → AES-CBC 密文落盘（流式 + CRC32 记录密文属性）。
+     * 与 encryptDexToFile 一致，仅输入源由「APK 条目」改为「独立 DEX 文件」。
+     */
+    private static EncDex encryptFileToFile(File src, byte[] key, File out) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(key));
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        try (InputStream in = new BufferedInputStream(new FileInputStream(src));
+             java.util.zip.CheckedOutputStream cos = new java.util.zip.CheckedOutputStream(
+                     new BufferedOutputStream(new FileOutputStream(out)), crc);
+             javax.crypto.CipherOutputStream cios = new javax.crypto.CipherOutputStream(cos, cipher)) {
+            transfer(in, cios);
+        }
+        return new EncDex(out, out.length(), crc.getValue(), src.length());
     }
 
     /** 流式计算文件 SHA-256（hex 小写） */

@@ -19,6 +19,7 @@
     <string name="opt_anti_debug">反调试检测</string>
     <string name="opt_sign_verify">签名校验</string>
     <string name="opt_junk_code">垃圾代码注入（junk dex）</string>
+    <string name="opt_control_flow">控制流混淆（指令流改写）</string>
     <string name="opt_resource_obfuscate">资源混淆（路径+arsc名称随机化）</string>
     <string name="apk_info">APK信息</string>
     <string name="file_size">文件大小</string>
