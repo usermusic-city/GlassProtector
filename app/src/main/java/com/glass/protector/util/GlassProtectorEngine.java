@@ -234,7 +234,7 @@ public class GlassProtectorEngine {
         // 6. 重打包
         log("[6/8] 重打包 APK ...");
         rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes,
-                junkDex, elfSo64, elfSo32, config.isResourceObfuscate(), dexNames.size());
+                junkDex, config.isResourceObfuscate(), dexNames.size());
 
         // 7. zipalign
         log("[7/8] zipalign 对齐 ...");
@@ -316,13 +316,11 @@ public class GlassProtectorEngine {
 
     /**
      * 流式重打包：原样复制所有 entry（保持 STORED/DEFLATED），
-     * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX、加密 DEX、
-     * junk dex 与 ELF 配置容器。
+     * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX、加密 DEX 与 junk dex。
      */
     private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
                             byte[] configBlob, List<EncDex> encDexes,
                             File junkDex,
-                            byte[] elfSo64, byte[] elfSo32,
                             boolean scrubMeta, int origDexCount) throws Exception {
         try (ZipFile zip = new ZipFile(input);
              ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
