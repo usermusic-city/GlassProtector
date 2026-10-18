@@ -37,7 +37,6 @@ public class GlassProtectFragment extends Fragment {
     private RadioGroup levelGroup;
     private SwitchMaterial optDexEncrypt, optStringEncrypt, optAntiDebug, optSignVerify,
             optResourceObfuscate, optJunkCode;
-    private SwitchMaterial optDex2c, optAssetsEncrypt;
 
     private String selectedApkPath;
 
@@ -76,8 +75,6 @@ public class GlassProtectFragment extends Fragment {
         optSignVerify = view.findViewById(R.id.glass_optSignVerify);
         optResourceObfuscate = view.findViewById(R.id.glass_optResourceObfuscate);
         optJunkCode = view.findViewById(R.id.glass_optJunkCode);
-        optDex2c = view.findViewById(R.id.glass_optDex2c);
-        optAssetsEncrypt = view.findViewById(R.id.glass_optAssetsEncrypt);
     }
 
     private void setupListeners() {
@@ -99,8 +96,6 @@ public class GlassProtectFragment extends Fragment {
             optSignVerify.setChecked(config.isGlassSignVerify());
             optResourceObfuscate.setChecked(config.isResourceObfuscate());
             optJunkCode.setChecked(config.isGlassJunkCode());
-            optDex2c.setChecked(config.isDex2cEnabled());
-            optAssetsEncrypt.setChecked(config.isAssetsEncryptEnabled());
         });
 
         startProtectBtn.setOnClickListener(v -> startProtect());
@@ -147,8 +142,6 @@ public class GlassProtectFragment extends Fragment {
         config.setGlassSignVerify(optSignVerify.isChecked());
         config.setResourceObfuscate(optResourceObfuscate.isChecked());
         config.setGlassJunkCode(optJunkCode.isChecked());
-        config.setDex2cEnabled(optDex2c.isChecked());
-        config.setAssetsEncryptEnabled(optAssetsEncrypt.isChecked());
 
         // 使用设置中配置的导出目录
         config.setOutputDir(SettingsFragment.getOutputDir(requireContext()));

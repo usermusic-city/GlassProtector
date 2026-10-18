@@ -25,15 +25,11 @@ public class ProtectConfig implements Serializable {
 
     // Glass加固选项
     private boolean dexEncrypt = true;         // DEX加密
-    private boolean glassStringEncrypt = true; // 字符串加密
+    private boolean glassStringEncrypt = true; // 资产名随机化
     private boolean glassAntiDebug = true;     // 反调试
     private boolean glassSignVerify = true;    // 签名校验
     private boolean resourceObfuscate = false; // 资源混淆
     private boolean glassJunkCode = false;     // 垃圾代码
-
-    // 高级防护选项
-    private boolean dex2cEnabled = false;          // Dex2C（将Java方法转为C native代码）
-    private boolean assetsEncryptEnabled = false;  // assets资源加密
 
     public ProtectConfig() {
         this.level = Level.MEDIUM;
@@ -41,22 +37,6 @@ public class ProtectConfig implements Serializable {
 
     // 根据强度自动配置选项
     public void applyLevelPreset() {
-        // 高级防护选项
-        switch (level) {
-            case LOW:
-                dex2cEnabled = false;
-                assetsEncryptEnabled = false;
-                break;
-            case MEDIUM:
-                dex2cEnabled = false;
-                assetsEncryptEnabled = true;
-                break;
-            case HIGH:
-                dex2cEnabled = true;
-                assetsEncryptEnabled = true;
-                break;
-        }
-
         switch (level) {
             case LOW:
                 dexEncrypt = true;
@@ -126,11 +106,4 @@ public class ProtectConfig implements Serializable {
 
     public boolean isGlassJunkCode() { return glassJunkCode; }
     public void setGlassJunkCode(boolean glassJunkCode) { this.glassJunkCode = glassJunkCode; }
-
-    // 高级防护选项 getter/setter
-    public boolean isDex2cEnabled() { return dex2cEnabled; }
-    public void setDex2cEnabled(boolean dex2cEnabled) { this.dex2cEnabled = dex2cEnabled; }
-
-    public boolean isAssetsEncryptEnabled() { return assetsEncryptEnabled; }
-    public void setAssetsEncryptEnabled(boolean assetsEncryptEnabled) { this.assetsEncryptEnabled = assetsEncryptEnabled; }
 }

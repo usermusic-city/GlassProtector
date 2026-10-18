@@ -20,7 +20,7 @@ import javax.crypto.spec.SecretKeySpec;
  * 原 Application 与全部业务 DEX 被加密进 assets（或明文保留，视配置）。
  * <p>
  * 启动流程：
- * 1. attachBaseContext：读配置（Dex2C 时优先 native ELF 容器）→ 反篡改检测
+ * 1. attachBaseContext：读配置 → 反篡改检测
  *    → 逐个 SHA-256 完整性校验 → 解密 DEX（明文模式直读）→ 注入宿主 ClassLoader → 替换回原 Application
  * 2. onCreate：回调原 Application 的 onCreate
  */
@@ -41,11 +41,8 @@ public class GlassApplication extends Application {
     }
 
     private void bootstrap(Context base) throws Exception {
-        // 1. 读配置（Dex2C 模式优先从 nativeLibraryDir/libglass_core.so 提取）
+        // 1. 读配置
         ShellData cfg = ShellData.load(base);
-        if (cfg.fromElf) {
-            android.util.Log.i("GlassShell", "config loaded from native ELF container");
-        }
 
         // 2. 反篡改（命中即自杀，不返回）
         AntiTamper.check(base, cfg);

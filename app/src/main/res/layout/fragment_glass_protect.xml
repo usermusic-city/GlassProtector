@@ -326,30 +326,6 @@
                     android:textColor="@color/glass_text_primary"
                     android:textSize="14sp"
                     android:textStyle="bold" />
-
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/glass_optDex2c"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Dex2C（配置下沉Native容器）"
-                    android:textColor="@color/glass_text_primary"
-                    android:textSize="13sp"
-                    android:checked="false"
-                    app:thumbTint="@color/glass_primary"
-                    app:trackTint="@color/glass_card_border" />
-
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/glass_optAssetsEncrypt"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="assets资源加密（二次AES+诱饵）"
-                    android:textColor="@color/glass_text_primary"
-                    android:textSize="13sp"
-                    android:checked="false"
-                    app:thumbTint="@color/glass_primary"
-                    app:trackTint="@color/glass_card_border" />
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 

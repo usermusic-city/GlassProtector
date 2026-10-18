@@ -70,7 +70,6 @@ public class GlassProtectorEngine {
     private static final String DEX_ASSET_FORMAT = "glass_dex_%d.enc";
     private static final String SHELL_DEX_ASSET = "shell.dex";
     private static final String JUNK_DEX_ASSET = "junk.dex";
-    private static final String ELF_SO_NAME = "libglass_core.so";
     private static final String KEYSTORE_ASSET = "glass.p12";
     private static final String KEYSTORE_PASSWORD = "glass123";
     private static final String KEYSTORE_ALIAS = "glass";
@@ -202,7 +201,7 @@ public class GlassProtectorEngine {
         cfg.put("dexAssets", namesSb.toString());
         cfg.put("dexSha", shasSb.toString());
         if (config.isGlassStringEncrypt()) {
-            log("  字符串加密: DEX 资产名已随机化（glass_dex_N → 随机 8 位 hex），映射藏于加密配置");
+            log("  资产名随机化: DEX 资产名已随机化（glass_dex_N → 随机 8 位 hex），映射藏于加密配置");
         }
 
         // 4. 编辑 manifest：application name → 壳，extractNativeLibs=true
@@ -220,20 +219,7 @@ public class GlassProtectorEngine {
         byte[] newManifest = readFile(manifestOut);
 
         // 5.5 序列化壳配置（在字段写入之后，修复字段丢失）
-        if (config.isDex2cEnabled()) {
-            cfg.put("elfCfg", true);   // 壳优先从 nativeLibraryDir/libglass_core.so 读配置
-        }
         byte[] cfgEnc = buildConfigBlob(aesKey, cfg);
-
-        // 5.6 Dex2C：配置封装进手工构造的 ELF 容器（readelf 可验证的真 ELF）
-        byte[] elfSo64 = null, elfSo32 = null;
-        if (config.isDex2cEnabled()) {
-            elfSo64 = ElfBuilder.buildElf64(cfgEnc, "GlassProtector native config container");
-            elfSo32 = ElfBuilder.buildElf32(cfgEnc, "GlassProtector native config container");
-            log("  Dex2C: 配置已下沉 native 容器 lib/arm64-v8a/" + ELF_SO_NAME
-                    + " (ELF64, " + elfSo64.length + " B) 与 lib/armeabi-v7a/" + ELF_SO_NAME
-                    + " (ELF32, " + elfSo32.length + " B)");
-        }
 
         // 5.7 垃圾代码：释放预编译 junk dex（不透明谓词 + 控制流平坦化）
         File junkDex = null;
@@ -245,26 +231,10 @@ public class GlassProtectorEngine {
             }
         }
 
-        // 5.8 assets 加密：生成高熵诱饵文件（干扰资产分析）
-        List<byte[]> decoys = null;
-        if (config.isAssetsEncryptEnabled()) {
-            decoys = new ArrayList<>();
-            SecureRandom sr = new SecureRandom();
-            int n = 3 + sr.nextInt(4);
-            long decoyBytes = 0;
-            for (int i = 0; i < n; i++) {
-                byte[] b = new byte[8192 + sr.nextInt(32768)];
-                sr.nextBytes(b);
-                decoys.add(b);
-                decoyBytes += b.length;
-            }
-            log("  assets加密: 生成 " + n + " 个高熵诱饵（合计 " + (decoyBytes / 1024) + " KB）");
-        }
-
         // 6. 重打包
         log("[6/8] 重打包 APK ...");
         rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes,
-                junkDex, elfSo64, elfSo32, decoys, config.isResourceObfuscate(), dexNames.size());
+                junkDex, elfSo64, elfSo32, config.isResourceObfuscate(), dexNames.size());
 
         // 7. zipalign
         log("[7/8] zipalign 对齐 ...");
@@ -294,11 +264,9 @@ public class GlassProtectorEngine {
                 + "；加载前逐一 SHA-256 完整性校验；");
         log("反调试: " + (config.isGlassAntiDebug() ? "开启" : "关闭")
                 + "，签名校验: " + (config.isGlassSignVerify() ? "开启" : "关闭")
-                + "，字符串加密(资产名随机化): " + (config.isGlassStringEncrypt() ? "开启" : "关闭"));
+                + "，资产名随机化: " + (config.isGlassStringEncrypt() ? "开启" : "关闭"));
         log("资源混淆(路径+arsc+元数据): " + (config.isResourceObfuscate() ? "开启" : "关闭")
-                + "，垃圾代码(junk dex): " + (config.isGlassJunkCode() ? "开启" : "关闭")
-                + "，Dex2C(native容器): " + (config.isDex2cEnabled() ? "开启" : "关闭"));
-        log("assets加密(二次AES+诱饵): " + (config.isAssetsEncryptEnabled() ? "开启" : "关闭"));
+                + "，垃圾代码(junk dex): " + (config.isGlassJunkCode() ? "开启" : "关闭"));
         return outApk.getAbsolutePath();
     }
 
@@ -349,12 +317,12 @@ public class GlassProtectorEngine {
     /**
      * 流式重打包：原样复制所有 entry（保持 STORED/DEFLATED），
      * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX、加密 DEX、
-     * junk dex、ELF 配置容器与诱饵。
+     * junk dex 与 ELF 配置容器。
      */
     private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
                             byte[] configBlob, List<EncDex> encDexes,
                             File junkDex,
-                            byte[] elfSo64, byte[] elfSo32, List<byte[]> decoys,
+                            byte[] elfSo64, byte[] elfSo32,
                             boolean scrubMeta, int origDexCount) throws Exception {
         try (ZipFile zip = new ZipFile(input);
              ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
@@ -389,9 +357,6 @@ public class GlassProtectorEngine {
                 if (name.startsWith("META-INF/")
                         && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA")
                         || name.endsWith(".EC") || name.endsWith(".MF"))) continue;       // 旧签名
-                if (name.equals("lib/arm64-v8a/" + ELF_SO_NAME)
-                        || name.equals("lib/armeabi-v7a/" + ELF_SO_NAME)) continue;      // 清旧 ELF 容器
-
                 if (name.equals("resources.arsc")) {
                     // arsc：混淆后内容已变，必须重算 CRC（putEntry 内置）；保持 STORED
                     if (arscOut != null) {
@@ -434,19 +399,6 @@ public class GlassProtectorEngine {
                 String junkName = "classes" + (origDexCount + 1) + ".dex";
                 putEntry(zos, junkName, readFile(junkDex), ZipEntry.DEFLATED, ts);
                 log("  垃圾代码: 已注入 " + junkName + " (" + (junkDex.length() / 1024) + " KB)");
-            }
-            // Dex2C：ELF 配置容器（extractNativeLibs=true 时安装期解压到 nativeLibraryDir）
-            if (elfSo64 != null) {
-                putEntry(zos, "lib/arm64-v8a/" + ELF_SO_NAME, elfSo64, ZipEntry.DEFLATED, ts);
-            }
-            if (elfSo32 != null) {
-                putEntry(zos, "lib/armeabi-v7a/" + ELF_SO_NAME, elfSo32, ZipEntry.DEFLATED, ts);
-            }
-            // assets 加密：高熵诱饵
-            if (decoys != null) {
-                for (byte[] d : decoys) {
-                    putEntry(zos, "assets/" + randomHex(8) + ".bin", d, ZipEntry.DEFLATED, ts);
-                }
             }
         }
     }
@@ -572,7 +524,7 @@ public class GlassProtectorEngine {
         return sb.toString();
     }
 
-    /** DEX 资产名：字符串加密开启时随机化，否则默认名 */
+    /** DEX 资产名：资产名随机化开启时随机化，否则默认名 */
     private static String dexAssetName(int i, boolean randomize, boolean dexEnc) {
         if (randomize) {
             return randomHex(8) + ".gdx";
