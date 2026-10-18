@@ -162,40 +162,14 @@ public class GlassProtectorEngine {
         if (dexNames.isEmpty()) {
             throw new Exception("原 APK 中没有找到 DEX 文件");
         }
-        // 卢恩真改名：在加密前对明文 DEX 原地等长改名（真混淆，非产物塞文件）
-        LinkedHashMap<String, byte[]> runeDexes = null;
-        DexRuneRewriter.Result runeResult = null;
-        if (config.isRuneObfuscateEnabled()) {
-            log("  卢恩混淆: 读取 DEX 明文并收集 manifest 组件 keep 集 ...");
-            Set<String> keepClasses = collectManifestComponents(manifestData);
-            runeDexes = new LinkedHashMap<>();
-            for (String n : dexNames) {
-                runeDexes.put(n, readZipEntry(input, n));
-            }
-            runeResult = DexRuneRewriter.rewriteAll(runeDexes, keepClasses,
-                    config.isRuneObfuscateMethod(), logs);
-            log("  卢恩混淆: 类名改名 " + runeResult.renamedClasses + " / 方法名 "
-                    + runeResult.renamedMethods + " / 字符串 " + runeResult.renamedStrings
-                    + "，keep " + runeResult.keptClasses + " 个组件/native 类");
-        }
-
         List<EncDex> encDexes = new ArrayList<>();
         long totalDexBytes = 0;
         for (int i = 0; i < dexNames.size(); i++) {
             String dexName = dexNames.get(i);
             File encFile = new File(workDir, "payload_" + i + (dexEnc ? ".enc" : ".bin"));
-            EncDex info;
-            if (runeDexes != null) {
-                // 卢恩已改名：直接对改名字节落盘（加密或明文），origSize=改名后明文长度
-                byte[] plain = runeDexes.get(dexName);
-                info = dexEnc
-                        ? encryptBytesToFile(plain, aesKey, encFile)
-                        : copyBytesToFile(plain, encFile);
-            } else {
-                info = dexEnc
-                        ? encryptDexToFile(input, dexName, aesKey, encFile)
-                        : copyDexToFile(input, dexName, encFile);
-            }
+            EncDex info = dexEnc
+                    ? encryptDexToFile(input, dexName, aesKey, encFile)
+                    : copyDexToFile(input, dexName, encFile);
             info.assetName = dexAssetName(i, config.isGlassStringEncrypt(), dexEnc);
             info.sha256 = sha256File(encFile);
             encDexes.add(info);
@@ -206,7 +180,7 @@ public class GlassProtectorEngine {
         log("  共处理 " + encDexes.size() + " 个 DEX，合计 " + (totalDexBytes / 1024) + " KB"
                 + (dexEnc ? "" : "（明文模式）"));
 
-        // 3. 壳配置字段（JSON 统一在卢恩步骤之后序列化，避免字段丢失）
+        // 3. 壳配置字段（JSON 统一序列化，避免字段丢失）
         log("[3/8] 生成壳配置 ...");
         String signSha256 = certSha256(keyStoreFile, signStorePass, signAlias);
         JSONObject cfg = new JSONObject();
@@ -231,23 +205,7 @@ public class GlassProtectorEngine {
             log("  字符串加密: DEX 资产名已随机化（glass_dex_N → 随机 8 位 hex），映射藏于加密配置");
         }
 
-        // 4. 卢恩真改名：映射只存在于内存（改名后即丢弃），不向产物写入任何映射/还原钥匙，
-        //    避免 rune_map.txt / resolver.java 暴露「卢恩名→原类名」对照关系（附送解密钥匙）。
-        if (config.isRuneObfuscateEnabled() && runeResult != null) {
-            log("[4/8] 卢恩混淆: 真改名完成（映射不落盘，无还原钥匙泄露）");
-            cfg.put("runeObf", true);
-            cfg.put("runeClasses", runeResult.renamedClasses);
-            cfg.put("runeMethods", runeResult.renamedMethods);
-            cfg.put("runePackages", 0);
-            log("  已改名 " + runeResult.renamedClasses + " 类 / " + runeResult.renamedMethods
-                    + " 方法 / " + runeResult.renamedStrings + " 字符串（等长卢恩化，映射仅在内存，随进程销毁）");
-        } else if (config.isRuneObfuscateEnabled()) {
-            log("[4/8] 卢恩混淆: 无改名结果（异常），跳过");
-        } else {
-            log("[4/8] 卢恩混淆: 关闭");
-        }
-
-        // 5. 编辑 manifest：application name → 壳，extractNativeLibs=true
+        // 4. 编辑 manifest：application name → 壳，extractNativeLibs=true
         log("[5/8] 改写 manifest（壳入口接管）...");
         File manifestOut = new File(workDir, "AndroidManifest_new.xml");
         ModificationProperty property = new ModificationProperty();
@@ -261,7 +219,7 @@ public class GlassProtectorEngine {
                 manifestOut.getAbsolutePath(), property);
         byte[] newManifest = readFile(manifestOut);
 
-        // 5.5 序列化壳配置（在卢恩字段写入之后，修复字段丢失）
+        // 5.5 序列化壳配置（在字段写入之后，修复字段丢失）
         if (config.isDex2cEnabled()) {
             cfg.put("elfCfg", true);   // 壳优先从 nativeLibraryDir/libglass_core.so 读配置
         }
@@ -305,15 +263,8 @@ public class GlassProtectorEngine {
 
         // 6. 重打包
         log("[6/8] 重打包 APK ...");
-        boolean runeOnly = isRuneOnlyMode(config);
-        if (runeOnly) {
-            // 独立卢恩模式：不注入壳、不改 manifest、不加密，仅 DEX 改名 + 重签名
-            log("  独立卢恩模式：跳过壳注入/加密/配置，仅 DEX 卢恩改名后重签名");
-            rebuildRuneOnlyApk(input, unsignedApk, runeDexes);
-        } else {
-            rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes,
-                    junkDex, elfSo64, elfSo32, decoys, config.isResourceObfuscate(), dexNames.size());
-        }
+        rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes,
+                junkDex, elfSo64, elfSo32, decoys, config.isResourceObfuscate(), dexNames.size());
 
         // 7. zipalign
         log("[7/8] zipalign 对齐 ...");
@@ -347,8 +298,7 @@ public class GlassProtectorEngine {
         log("资源混淆(路径+arsc+元数据): " + (config.isResourceObfuscate() ? "开启" : "关闭")
                 + "，垃圾代码(junk dex): " + (config.isGlassJunkCode() ? "开启" : "关闭")
                 + "，Dex2C(native容器): " + (config.isDex2cEnabled() ? "开启" : "关闭"));
-        log("assets加密(二次AES+诱饵): " + (config.isAssetsEncryptEnabled() ? "开启" : "关闭")
-                + "，卢恩混淆: " + (config.isRuneObfuscateEnabled() ? "开启" : "关闭"));
+        log("assets加密(二次AES+诱饵): " + (config.isAssetsEncryptEnabled() ? "开启" : "关闭"));
         return outApk.getAbsolutePath();
     }
 
@@ -371,71 +321,6 @@ public class GlassProtectorEngine {
         } catch (Exception ignored) {
         }
         return null;
-    }
-
-    /**
-     * 收集 manifest 中所有组件的点分全名（activity/service/receiver/provider/
-     * application/appComponentFactory），作为卢恩改名的 keep 集。
-     * 相对名（.Foo）按 package 展开为全名。
-     */
-    private static Set<String> collectManifestComponents(byte[] manifest) {
-        Set<String> out = new LinkedHashSet<>();
-        String pkg = getManifestAttr(manifest, "manifest", "package");
-        try {
-            Set<String> tags = new HashSet<>(java.util.Arrays.asList(
-                    "activity", "activity-alias", "service", "receiver", "provider",
-                    "application", "app-component-factory"));
-            AxmlParser parser = new AxmlParser(manifest);
-            while (parser.next() != AxmlParser.END_FILE) {
-                if (parser.getAttrCount() == 0) continue;
-                String tag = parser.getName();
-                if (tag == null || !tags.contains(tag)) continue;
-                for (int i = 0; i < parser.getAttrCount(); i++) {
-                    if (!"name".equals(parser.getAttrName(i))) continue;
-                    Object v = parser.getAttrValue(i);
-                    String s = v == null ? null : String.valueOf(v);
-                    if (s == null || s.isEmpty()) continue;
-                    out.add(expandComponentName(s, pkg));
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return out;
-    }
-
-    /** 相对组件名（.Foo / Foo）按 package 展开为点分全名 */
-    private static String expandComponentName(String name, String pkg) {
-        if (name == null || name.isEmpty()) return name;
-        if (name.startsWith(".")) {
-            return (pkg == null || pkg.isEmpty()) ? name.substring(1) : pkg + name;
-        }
-        if (name.indexOf('.') < 0) {
-            return (pkg == null || pkg.isEmpty()) ? name : pkg + "." + name;
-        }
-        return name;
-    }
-
-    /** 从字节数组 AES 加密落盘（卢恩改名后的明文 DEX），返回密文 EncDex */
-    private static EncDex encryptBytesToFile(byte[] plain, byte[] key, File out) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(key));
-        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
-        try (java.util.zip.CheckedOutputStream cos = new java.util.zip.CheckedOutputStream(
-                new BufferedOutputStream(new FileOutputStream(out)), crc);
-             javax.crypto.CipherOutputStream cios = new javax.crypto.CipherOutputStream(cos, cipher)) {
-            cios.write(plain);
-        }
-        return new EncDex(out, out.length(), crc.getValue(), plain.length);
-    }
-
-    /** 从字节数组明文落盘（卢恩改名后的明文 DEX），返回 EncDex */
-    private static EncDex copyBytesToFile(byte[] plain, File out) throws Exception {
-        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
-        try (java.util.zip.CheckedOutputStream cos = new java.util.zip.CheckedOutputStream(
-                new BufferedOutputStream(new FileOutputStream(out)), crc)) {
-            cos.write(plain);
-        }
-        return new EncDex(out, out.length(), crc.getValue(), plain.length);
     }
 
     // ---------------- 加密 ----------------
@@ -462,56 +347,9 @@ public class GlassProtectorEngine {
     // ---------------- 重打包 ----------------
 
     /**
-     * 独立卢恩模式判定：卢恩混淆开启，且其余所有加固开关全部关闭。
-     * 此时跳过壳注入/加密/配置/manifest 改写，仅做 DEX 卢恩改名后重签名。
-     */
-    private static boolean isRuneOnlyMode(ProtectConfig c) {
-        return c.isRuneObfuscateEnabled()
-                && !c.isDexEncrypt()
-                && !c.isGlassStringEncrypt()
-                && !c.isGlassAntiDebug()
-                && !c.isGlassSignVerify()
-                && !c.isResourceObfuscate()
-                && !c.isGlassJunkCode()
-                && !c.isDex2cEnabled()
-                && !c.isAssetsEncryptEnabled();
-    }
-
-    /**
-     * 独立卢恩模式重打包：原样复制所有 entry（保持 STORED/DEFLATED），
-     * 跳过旧 DEX 与旧签名；DEX 用卢恩改名后的字节按原名落盘（明文、不加密、
-     * 不进 assets）；manifest 保持原样；只追加卢恩映射产物；不注入壳。
-     */
-    private void rebuildRuneOnlyApk(File input, File output,
-                                    LinkedHashMap<String, byte[]> runeDexes) throws Exception {
-        try (ZipFile zip = new ZipFile(input);
-             ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
-            Enumeration<? extends ZipEntry> entries = zip.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry e = entries.nextElement();
-                String name = e.getName();
-                // 旧 DEX 与旧签名跳过（DEX 将用改名后字节按原名重写）
-                if (name.startsWith("classes") && name.endsWith(".dex")) continue;
-                if (name.equals("META-INF/") || name.startsWith("META-INF/")) {
-                    if (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA")
-                            || name.endsWith(".EC") || name.endsWith(".MF")) continue;
-                }
-                if (name.startsWith("assets/rune_obf/")) continue; // 清旧 rune 产物
-                // manifest 保持原样复制（不改写，不注入壳入口）
-                copyEntry(zip, zos, e, false, null);
-            }
-            // 卢恩改名后的 DEX 按原名明文落盘
-            long ts = System.currentTimeMillis();
-            for (Map.Entry<String, byte[]> de : runeDexes.entrySet()) {
-                putEntry(zos, de.getKey(), de.getValue(), ZipEntry.DEFLATED, ts);
-            }
-        }
-    }
-
-    /**
      * 流式重打包：原样复制所有 entry（保持 STORED/DEFLATED），
      * 跳过旧 DEX 与旧签名，替换 manifest，追加壳 DEX、加密 DEX、
-     * junk dex、ELF 配置容器、卢恩产物与诱饵。
+     * junk dex、ELF 配置容器与诱饵。
      */
     private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
                             byte[] configBlob, List<EncDex> encDexes,
@@ -551,7 +389,6 @@ public class GlassProtectorEngine {
                 if (name.startsWith("META-INF/")
                         && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA")
                         || name.endsWith(".EC") || name.endsWith(".MF"))) continue;       // 旧签名
-                if (name.startsWith("assets/rune_obf/")) continue;                       // 清旧 rune 产物
                 if (name.equals("lib/arm64-v8a/" + ELF_SO_NAME)
                         || name.equals("lib/armeabi-v7a/" + ELF_SO_NAME)) continue;      // 清旧 ELF 容器
 
@@ -592,7 +429,6 @@ public class GlassProtectorEngine {
                 EncDex d = encDexes.get(i);
                 putFileEntry(zos, "assets/" + d.assetName, d.file, d.size, d.crc, ts);
             }
-            // 卢恩改名映射不落盘（无还原钥匙泄露）
             // 垃圾代码：junk dex 作为附加 classes(N+1).dex（真实类，干扰反编译分析）
             if (junkDex != null && junkDex.isFile()) {
                 String junkName = "classes" + (origDexCount + 1) + ".dex";

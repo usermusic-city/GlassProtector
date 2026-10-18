@@ -34,10 +34,6 @@ public class ProtectConfig implements Serializable {
     // 高级防护选项
     private boolean dex2cEnabled = false;          // Dex2C（将Java方法转为C native代码）
     private boolean assetsEncryptEnabled = false;  // assets资源加密
-    private boolean runeObfuscateEnabled = false;  // 卢恩字符混淆（类名/方法名/包名）
-    private boolean runeObfuscateClass = true;     // 混淆类名
-    private boolean runeObfuscateMethod = true;    // 混淆方法名
-    private boolean runeObfuscatePackage = false;  // 混淆包名
 
     public ProtectConfig() {
         this.level = Level.MEDIUM;
@@ -50,20 +46,14 @@ public class ProtectConfig implements Serializable {
             case LOW:
                 dex2cEnabled = false;
                 assetsEncryptEnabled = false;
-                runeObfuscateEnabled = false;
                 break;
             case MEDIUM:
                 dex2cEnabled = false;
                 assetsEncryptEnabled = true;
-                runeObfuscateEnabled = false;
                 break;
             case HIGH:
                 dex2cEnabled = true;
                 assetsEncryptEnabled = true;
-                runeObfuscateEnabled = true;
-                runeObfuscateClass = true;
-                runeObfuscateMethod = true;
-                runeObfuscatePackage = false;
                 break;
         }
 
@@ -143,16 +133,4 @@ public class ProtectConfig implements Serializable {
 
     public boolean isAssetsEncryptEnabled() { return assetsEncryptEnabled; }
     public void setAssetsEncryptEnabled(boolean assetsEncryptEnabled) { this.assetsEncryptEnabled = assetsEncryptEnabled; }
-
-    public boolean isRuneObfuscateEnabled() { return runeObfuscateEnabled; }
-    public void setRuneObfuscateEnabled(boolean runeObfuscateEnabled) { this.runeObfuscateEnabled = runeObfuscateEnabled; }
-
-    public boolean isRuneObfuscateClass() { return runeObfuscateClass; }
-    public void setRuneObfuscateClass(boolean runeObfuscateClass) { this.runeObfuscateClass = runeObfuscateClass; }
-
-    public boolean isRuneObfuscateMethod() { return runeObfuscateMethod; }
-    public void setRuneObfuscateMethod(boolean runeObfuscateMethod) { this.runeObfuscateMethod = runeObfuscateMethod; }
-
-    public boolean isRuneObfuscatePackage() { return runeObfuscatePackage; }
-    public void setRuneObfuscatePackage(boolean runeObfuscatePackage) { this.runeObfuscatePackage = runeObfuscatePackage; }
 }
