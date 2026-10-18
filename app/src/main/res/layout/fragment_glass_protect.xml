@@ -350,18 +350,51 @@
                     android:checked="false"
                     app:thumbTint="@color/glass_primary"
                     app:trackTint="@color/glass_card_border" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@android:color/transparent"
+            app:cardElevation="0dp"
+            app:cardCornerRadius="20dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/glass_card_bg"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="卢恩混淆（真改名）"
+                    android:textColor="@color/glass_text_primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/glass_optRuneObfuscate"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="卢恩字符混淆（映射产物三件套）"
+                    android:layout_marginTop="8dp"
+                    android:text="类名/方法名等长卢恩化改名"
                     android:textColor="@color/glass_text_primary"
                     android:textSize="13sp"
                     android:checked="false"
                     app:thumbTint="@color/glass_primary"
                     app:trackTint="@color/glass_card_border" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="DEX 类名等长替换为 Elder Futhark 卢恩字符（真混淆，非塞文件）。仅开此项时进入独立模式：不加固壳、不加密，只做改名后重签名。"
+                    android:textColor="@color/glass_text_secondary"
+                    android:textSize="12sp" />
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
