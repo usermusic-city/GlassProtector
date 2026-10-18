@@ -25,7 +25,7 @@ import java.util.zip.Adler32;
  *  - ASCII 字符占 1 字节；卢恩 U+16A0..U+16E2 在 MUTF-8 占 3 字节
  *  - 描述符按 L / $ 段化，段内 3 个 ASCII → 1 个卢恩，尾数 b%3 用随机小写字母补齐
  *  - data 字节数不变 → string_ids 偏移不变 → 全部结构偏移不变
- *  - utf16_size 变小但仍 ≤127 → ULEB128 长度不变（>63 的字符串直接跳过）
+ *  - utf16_size 变小（3 ASCII→1 卢恩），但改写后必须写回新值（单字节 uleb 原地更新）
  *  - 改写完成后仅重算 header SHA-1 signature 与 adler32 checksum
  *
  *  引用同步（自动生效）：
@@ -76,6 +76,10 @@ public final class DexRuneRewriter {
         public final Map<String, String> methodMap = new LinkedHashMap<>();
         /** 段级共享映射（包结构保留，同名段同步） */
         public final Map<String, String> segmentMap = new LinkedHashMap<>();
+        /** 类描述符段已占用的目标名（保证不同段名→不同目标，杜绝类定义重复） */
+        public final Set<String> usedClassTargets = new LinkedHashSet<>();
+        /** 方法名已占用的目标名（保证不同方法名→不同目标） */
+        public final Set<String> usedMethodTargets = new LinkedHashSet<>();
         public int dexCount;
         public int definedClasses;
         public int keptClasses;
@@ -124,7 +128,7 @@ public final class DexRuneRewriter {
         for (String desc : defined) {
             if (keepDesc.contains(desc)) continue;
             if (isFrameworkClass(desc)) continue; // 系统/框架类不改名（防运行时崩溃）
-            String newDesc = mapDescriptor(desc, rand, r.segmentMap);
+            String newDesc = mapDescriptor(desc, rand, r.segmentMap, r.usedClassTargets);
             if (newDesc != null) {
                 r.classMap.put(desc, newDesc);
             }
@@ -133,13 +137,18 @@ public final class DexRuneRewriter {
 
         // ---- 生成方法名映射（仅全 private 使用、非黑名单） ----
         if (obfMethod) {
+            // 方法名用独立缓存（与类段缓存分离），避免命名空间互相污染
+            Map<String, String> methodSegCache = new LinkedHashMap<>();
             for (Map.Entry<String, Boolean> e : methodUnsafe.entrySet()) {
                 String name = e.getKey();
                 if (Boolean.TRUE.equals(e.getValue())) continue;
                 if (name.length() < MIN_METHOD_NAME_LEN) continue;
                 if (METHOD_NAME_BLACKLIST.contains(name)) continue;
                 if (!isAsciiIdent(name)) continue;
-                r.methodMap.put(name, mapPlainName(name, rand, r.segmentMap));
+                String mapped = mapPlainName(name, rand, methodSegCache, r.usedMethodTargets);
+                if (mapped != null) {
+                    r.methodMap.put(name, mapped);
+                }
             }
             r.renamedMethods = r.methodMap.size();
         }
@@ -196,7 +205,8 @@ public final class DexRuneRewriter {
      * 段按 '/' '$' 划分，段级共享缓存保证同名段全局一致（点分名同步的前提）。
      * 返回 null 表示无法等长替换（跳过）。
      */
-    private static String mapDescriptor(String desc, Random rand, Map<String, String> segMap) {
+    private static String mapDescriptor(String desc, Random rand, Map<String, String> segMap,
+                                       Set<String> usedTargets) {
         if (!desc.startsWith("L") || !desc.endsWith(";")) return null;
         if (desc.length() > MAX_STR_CHARS) return null;
         String body = desc.substring(1, desc.length() - 1);
@@ -209,7 +219,7 @@ public final class DexRuneRewriter {
             char c = body.charAt(i);
             if (c == '/' || c == '$') {
                 if (seg.length() == 0) return null; // 异常描述符
-                String mapped = mapSegment(seg.toString(), rand, segMap);
+                String mapped = mapSegment(seg.toString(), rand, segMap, usedTargets);
                 if (mapped == null) return null;
                 out.append(mapped).append(c);
                 seg.setLength(0);
@@ -218,7 +228,7 @@ public final class DexRuneRewriter {
             }
         }
         if (seg.length() == 0) return null;
-        String mapped = mapSegment(seg.toString(), rand, segMap);
+        String mapped = mapSegment(seg.toString(), rand, segMap, usedTargets);
         if (mapped == null) return null;
         out.append(mapped).append(';');
         String newDesc = out.toString();
@@ -231,29 +241,40 @@ public final class DexRuneRewriter {
      * 段映射：len 个 ASCII → floor(len/3) 个卢恩 + len%3 个随机小写字母。
      * 段级缓存：同段名（如 "com"）全局同一结果 → 包结构保留 + 点分名同步。
      */
-    private static String mapSegment(String seg, Random rand, Map<String, String> segMap) {
+    private static String mapSegment(String seg, Random rand, Map<String, String> segMap,
+                                     Set<String> usedTargets) {
         String cached = segMap.get(seg);
         if (cached != null) return cached;
         if (seg.length() > MAX_STR_CHARS - 2) return null; // 防超长
-        StringBuilder sb = new StringBuilder(seg.length() + 8);
         int full = seg.length() / 3;
-        for (int i = 0; i < full; i++) {
-            sb.append(RUNES[rand.nextInt(RUNES.length)]);
+        int rem = seg.length() % 3;
+        if (full == 0 && rem == 0) return null;
+        // 目标空间上界（full 个卢恩 * rem 个字母），据此限制重试次数，避免死循环
+        long space = 1;
+        for (int i = 0; i < full; i++) space *= RUNES.length;
+        for (int i = 0; i < rem; i++) space *= 26;
+        long maxAttempts = Math.min(space * 4 + 16, 4096);
+        for (long attempt = 0; attempt < maxAttempts; attempt++) {
+            StringBuilder sb = new StringBuilder(full + rem);
+            for (int i = 0; i < full; i++) sb.append(RUNES[rand.nextInt(RUNES.length)]);
+            for (int i = 0; i < rem; i++) sb.append((char) ('a' + rand.nextInt(26)));
+            String mapped = sb.toString();
+            // Set.add 返回 true 表示该目标此前未被占用（唯一），false 表示碰撞
+            if (usedTargets.add(mapped)) {
+                segMap.put(seg, mapped);
+                return mapped;
+            }
+            // 碰撞：继续推进 rand 重试，直到找到唯一目标或空间耗尽
         }
-        for (int i = 0; i < seg.length() % 3; i++) {
-            sb.append((char) ('a' + rand.nextInt(26)));
-        }
-        if (sb.length() == 0) return null;
-        String mapped = sb.toString();
-        segMap.put(seg, mapped);
-        return mapped;
+        return null; // 该长度空间耗尽：此段不改名（对应整个类/方法名 keep 原名）
     }
 
-    /** 纯名字（方法名）：整体做等长段映射，无结构符 */
-    private static String mapPlainName(String name, Random rand, Map<String, String> segMap) {
-        String cached = segMap.get(name);
+    /** 纯名字（方法名）：整体做等长段映射，无结构符。独立缓存 + 独立 usedTargets。 */
+    private static String mapPlainName(String name, Random rand, Map<String, String> methodCache,
+                                       Set<String> usedTargets) {
+        String cached = methodCache.get(name);
         if (cached != null) return cached;
-        return mapSegment(name, rand, segMap);
+        return mapSegment(name, rand, methodCache, usedTargets);
     }
 
     // ==================== DEX 结构解析（pass 1） ====================
@@ -381,6 +402,12 @@ public final class DexRuneRewriter {
             byte[] enc = t.getBytes(StandardCharsets.UTF_8); // MUTF-8 与 UTF-8 在 BMP 非 null 一致
             if (enc.length != bytes) continue; // 等长硬校验（理论上必成立）
             System.arraycopy(enc, 0, dex, start, bytes);
+            // 关键修复：utf16_size 必须写回新值。
+            // 卢恩/小写字母均为 BMP 单码元，故新 utf16_size = t.length()。
+            // 旧 size<=63 时 uleb 为单字节；新 size<=旧 size 也 <=63，仍单字节，
+            // 因此原地改写 dataOff 处 1 字节即可，不破坏后续偏移。
+            int newSize = t.length();
+            dex[dataOff] = (byte) newSize;
             renamed++;
         }
         if (renamed > 0) {
