@@ -368,13 +368,37 @@
                 android:orientation="vertical"
                 android:padding="16dp">
 
-                <TextView
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="卢恩混淆（真改名）"
-                    android:textColor="@color/glass_text_primary"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="卢恩混淆（真改名）"
+                        android:textColor="@color/glass_text_primary"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <View
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_weight="1" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="独立功能"
+                        android:textColor="@color/glass_success"
+                        android:textSize="11sp"
+                        android:background="@drawable/glass_tag_bg"
+                        android:paddingStart="8dp"
+                        android:paddingEnd="8dp"
+                        android:paddingTop="3dp"
+                        android:paddingBottom="3dp" />
+                </LinearLayout>
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/glass_optRuneObfuscate"
@@ -392,7 +416,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="DEX 类名等长替换为 Elder Futhark 卢恩字符（真混淆，非塞文件）。仅开此项时进入独立模式：不加固壳、不加密，只做改名后重签名。"
+                    android:text="DEX 类名等长替换为 Elder Futhark 卢恩字符（真混淆，非塞文件）。映射关系不落盘、不生成还原钥匙，改名后即自洽运行。仅开此项时进入独立模式：不加固壳、不加密，只做改名后重签名。"
                     android:textColor="@color/glass_text_secondary"
                     android:textSize="12sp" />
             </LinearLayout>

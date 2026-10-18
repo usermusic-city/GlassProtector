@@ -16,8 +16,9 @@ import java.util.zip.Adler32;
 /**
  * DEX 卢恩真改名器（DexRuneRewriter）
  *
- * 与 RuneObfuscator（产物层映射表）不同，本类对 DEX 字符串池做【等长原地替换】，
- * 类名/描述符真实变更为 Elder Futhark 卢恩标识符，运行时加载的就是改名后的类：
+ * 对 DEX 字符串池做【等长原地替换】，类名/描述符真实变更为 Elder Futhark 卢恩
+ * 标识符，运行时加载的就是改名后的类。映射关系仅存在于本次进程内存，改名完成后
+ * 即随进程销毁，不向 APK 写入任何「卢恩名→原类名」对照产物（无还原钥匙泄露）。
  *
  *  原理（等长数学，结构零破坏）：
  *  - DEX string_data_item = uleb128(utf16_size) + MUTF-8 data + 0x00
@@ -69,7 +70,7 @@ public final class DexRuneRewriter {
     // ==================== 结果 ====================
 
     public static final class Result {
-        /** 原描述符 Lcom/a/Foo; → 卢恩描述符（真改名映射，rune_map.txt 内容） */
+        /** 原描述符 Lcom/a/Foo; → 卢恩描述符（真改名映射，仅存内存，不落盘） */
         public final Map<String, String> classMap = new LinkedHashMap<>();
         /** 原方法名 → 卢恩方法名（仅 private） */
         public final Map<String, String> methodMap = new LinkedHashMap<>();
@@ -82,30 +83,6 @@ public final class DexRuneRewriter {
         public int renamedMethods;
         public int renamedStrings;
         public int skippedLong;
-        public final List<String[]> samples = new ArrayList<>();
-
-        public String mapTxt() {
-            StringBuilder sb = new StringBuilder(32 * 1024);
-            sb.append("# GlassProtector Rune DEX Mapping (real rename)\n");
-            sb.append("# dex=").append(dexCount)
-                    .append(" defined=").append(definedClasses)
-                    .append(" kept=").append(keptClasses)
-                    .append(" renamed=").append(renamedClasses)
-                    .append(" methods=").append(renamedMethods)
-                    .append(" strings=").append(renamedStrings)
-                    .append(" skippedLong=").append(skippedLong).append('\n');
-            sb.append("# keep: manifest components + native classes; methods: private only\n\n");
-            for (Map.Entry<String, String> e : classMap.entrySet()) {
-                sb.append(e.getKey()).append(" -> ").append(e.getValue()).append('\n');
-            }
-            if (!methodMap.isEmpty()) {
-                sb.append("\n# methods (private)\n");
-                for (Map.Entry<String, String> e : methodMap.entrySet()) {
-                    sb.append(e.getKey()).append(" -> ").append(e.getValue()).append('\n');
-                }
-            }
-            return sb.toString();
-        }
     }
 
     // ==================== 入口 ====================
@@ -182,10 +159,6 @@ public final class DexRuneRewriter {
             entryIdx++;
         }
 
-        for (Map.Entry<String, String> e : r.classMap.entrySet()) {
-            r.samples.add(new String[]{e.getKey(), e.getValue()});
-            if (r.samples.size() >= 5) break;
-        }
         return r;
     }
 

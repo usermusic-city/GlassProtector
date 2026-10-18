@@ -231,46 +231,18 @@ public class GlassProtectorEngine {
             log("  字符串加密: DEX 资产名已随机化（glass_dex_N → 随机 8 位 hex），映射藏于加密配置");
         }
 
-        // 4. 卢恩真改名映射产物（基于 runeResult 生成，与 DEX 实际改名一致）
-        List<RuneObfuscator.RuneFile> runeFiles = null;
+        // 4. 卢恩真改名：映射只存在于内存（改名后即丢弃），不向产物写入任何映射/还原钥匙，
+        //    避免 rune_map.txt / resolver.java 暴露「卢恩名→原类名」对照关系（附送解密钥匙）。
         if (config.isRuneObfuscateEnabled() && runeResult != null) {
-            log("[4/8] 卢恩混淆: 生成真实映射产物 ...");
+            log("[4/8] 卢恩混淆: 真改名完成（映射不落盘，无还原钥匙泄露）");
             cfg.put("runeObf", true);
             cfg.put("runeClasses", runeResult.renamedClasses);
             cfg.put("runeMethods", runeResult.renamedMethods);
             cfg.put("runePackages", 0);
-            byte[] mapTxt = runeResult.mapTxt().getBytes(StandardCharsets.UTF_8);
-            byte[] mapBin = RuneObfuscator.xorSalt(mapTxt);
-            byte[] resolver = buildRuneResolver(runeResult);
-            runeFiles = new ArrayList<>();
-            runeFiles.add(new RuneObfuscator.RuneFile(
-                    RuneObfuscator.RUNE_ASSET_DIR + "/rune_map.txt", mapTxt));
-            runeFiles.add(new RuneObfuscator.RuneFile(
-                    RuneObfuscator.RUNE_ASSET_DIR + "/rune_data.bin", mapBin));
-            runeFiles.add(new RuneObfuscator.RuneFile(
-                    RuneObfuscator.RUNE_ASSET_DIR + "/resolver.java", resolver));
-            log("  映射 " + runeResult.renamedClasses + " 类 / " + runeResult.renamedMethods
-                    + " 方法 → assets/rune_obf/（真实改名映射，与 DEX 一致）");
-            log("  产物: rune_map.txt (真实映射) + rune_data.bin (XOR) + resolver.java");
-            if (!runeResult.samples.isEmpty()) {
-                log("  对照样例:");
-                for (String[] s : runeResult.samples) {
-                    log("    " + s[0] + " -> " + s[1]);
-                }
-            }
-            // assets 加密：rune_data.bin 二次 AES（密钥藏于加密配置，壳不读取该文件，纯静态对抗）
-            if (config.isAssetsEncryptEnabled()) {
-                for (int i = 0; i < runeFiles.size(); i++) {
-                    RuneObfuscator.RuneFile rf = runeFiles.get(i);
-                    if (rf.assetPath.endsWith("rune_data.bin")) {
-                        runeFiles.set(i, new RuneObfuscator.RuneFile(
-                                rf.assetPath, aesEncrypt(aesKey, rf.data)));
-                        log("  assets加密: rune_data.bin 已二次 AES 加密");
-                    }
-                }
-            }
+            log("  已改名 " + runeResult.renamedClasses + " 类 / " + runeResult.renamedMethods
+                    + " 方法 / " + runeResult.renamedStrings + " 字符串（等长卢恩化，映射仅在内存，随进程销毁）");
         } else if (config.isRuneObfuscateEnabled()) {
-            log("[4/8] 卢恩混淆: 无改名结果（异常），跳过产物");
+            log("[4/8] 卢恩混淆: 无改名结果（异常），跳过");
         } else {
             log("[4/8] 卢恩混淆: 关闭");
         }
@@ -337,9 +309,9 @@ public class GlassProtectorEngine {
         if (runeOnly) {
             // 独立卢恩模式：不注入壳、不改 manifest、不加密，仅 DEX 改名 + 重签名
             log("  独立卢恩模式：跳过壳注入/加密/配置，仅 DEX 卢恩改名后重签名");
-            rebuildRuneOnlyApk(input, unsignedApk, runeDexes, runeFiles);
+            rebuildRuneOnlyApk(input, unsignedApk, runeDexes);
         } else {
-            rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes, runeFiles,
+            rebuildApk(input, unsignedApk, newManifest, shellDex, cfgEnc, encDexes,
                     junkDex, elfSo64, elfSo32, decoys, config.isResourceObfuscate(), dexNames.size());
         }
 
@@ -443,27 +415,6 @@ public class GlassProtectorEngine {
         return name;
     }
 
-    /** 基于真实改名映射生成 resolver.java（辅助反混淆解析的对照代码） */
-    private static byte[] buildRuneResolver(DexRuneRewriter.Result r) {
-        StringBuilder sb = new StringBuilder(16 * 1024);
-        sb.append("// GlassProtector Rune Resolver (auto-generated, real rename map)\n");
-        sb.append("// 用法：把下面 map 里「卢恩描述符」还原为原类名（运行时反混淆辅助）\n");
-        sb.append("public final class RuneResolver {\n");
-        sb.append("    private static final java.util.Map<String, String> MAP = new java.util.HashMap<>();\n");
-        sb.append("    static {\n");
-        for (Map.Entry<String, String> e : r.classMap.entrySet()) {
-            sb.append("        MAP.put(\"").append(e.getValue()).append("\", \"")
-                    .append(e.getKey()).append("\");\n");
-        }
-        sb.append("    }\n");
-        sb.append("    public static String resolve(String runeDesc) {\n");
-        sb.append("        String v = MAP.get(runeDesc);\n");
-        sb.append("        return v != null ? v : runeDesc;\n");
-        sb.append("    }\n");
-        sb.append("}\n");
-        return sb.toString().getBytes(StandardCharsets.UTF_8);
-    }
-
     /** 从字节数组 AES 加密落盘（卢恩改名后的明文 DEX），返回密文 EncDex */
     private static EncDex encryptBytesToFile(byte[] plain, byte[] key, File out) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
@@ -532,8 +483,7 @@ public class GlassProtectorEngine {
      * 不进 assets）；manifest 保持原样；只追加卢恩映射产物；不注入壳。
      */
     private void rebuildRuneOnlyApk(File input, File output,
-                                    LinkedHashMap<String, byte[]> runeDexes,
-                                    List<RuneObfuscator.RuneFile> runeFiles) throws Exception {
+                                    LinkedHashMap<String, byte[]> runeDexes) throws Exception {
         try (ZipFile zip = new ZipFile(input);
              ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(output)))) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
@@ -555,12 +505,6 @@ public class GlassProtectorEngine {
             for (Map.Entry<String, byte[]> de : runeDexes.entrySet()) {
                 putEntry(zos, de.getKey(), de.getValue(), ZipEntry.DEFLATED, ts);
             }
-            // 卢恩映射产物
-            if (runeFiles != null) {
-                for (RuneObfuscator.RuneFile rf : runeFiles) {
-                    putEntry(zos, rf.assetPath, rf.data, ZipEntry.DEFLATED, ts);
-                }
-            }
         }
     }
 
@@ -571,7 +515,7 @@ public class GlassProtectorEngine {
      */
     private void rebuildApk(File input, File output, byte[] newManifest, File shellDex,
                             byte[] configBlob, List<EncDex> encDexes,
-                            List<RuneObfuscator.RuneFile> runeFiles, File junkDex,
+                            File junkDex,
                             byte[] elfSo64, byte[] elfSo32, List<byte[]> decoys,
                             boolean scrubMeta, int origDexCount) throws Exception {
         try (ZipFile zip = new ZipFile(input);
@@ -648,12 +592,7 @@ public class GlassProtectorEngine {
                 EncDex d = encDexes.get(i);
                 putFileEntry(zos, "assets/" + d.assetName, d.file, d.size, d.crc, ts);
             }
-            // 卢恩混淆产物
-            if (runeFiles != null) {
-                for (RuneObfuscator.RuneFile rf : runeFiles) {
-                    putEntry(zos, rf.assetPath, rf.data, ZipEntry.DEFLATED, ts);
-                }
-            }
+            // 卢恩改名映射不落盘（无还原钥匙泄露）
             // 垃圾代码：junk dex 作为附加 classes(N+1).dex（真实类，干扰反编译分析）
             if (junkDex != null && junkDex.isFile()) {
                 String junkName = "classes" + (origDexCount + 1) + ".dex";
