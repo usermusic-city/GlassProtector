@@ -12,7 +12,7 @@ GlassProtector 是一款基于 **玻璃拟态（Glassmorphism）UI设计** 的 A
 
 | 引擎 | 类型 | 核心技术 | 来源 |
 |------|------|---------|------|
-| **Glass自研加固** | DEX加密壳 | AES-128-CBC DEX加密 + 字符串混淆 + 反调试 + 签名校验 + 卢恩字符混淆 | 完全自主研发 |
+| **Glass自研加固** | DEX加密壳 | AES-128-CBC DEX加密 + 字符串混淆 + 反调试 + 签名校验 | 完全自主研发 |
 
 ### 玻璃透明UI特性
 
@@ -31,7 +31,6 @@ GlassProtector 是一款基于 **玻璃拟态（Glassmorphism）UI设计** 的 A
 - ✅ SHA-256签名校验
 - ✅ 资源混淆（资源名重命名 + arsc混淆）
 - ✅ 垃圾代码注入（控制流平坦化 + 不透明谓词）
-- ✅ 卢恩字符混淆（类名/方法名/包名 Elder Futhark 符文映射）
 - ✅ 三档强度可选（低/中/高）
 
 ## 项目结构
@@ -52,8 +51,7 @@ GlassProtector/
 │   │   │   │   └── ProtectConfig.java     # 加固配置
 │   │   │   └── util/
 │   │   │       ├── ApkUtils.java          # APK工具类
-│   │   │       ├── GlassProtectorEngine.java # Glass加固引擎
-│   │   │       └── RuneObfuscator.java    # 卢恩字符混淆器
+│   │   │       └── GlassProtectorEngine.java # Glass加固引擎
 │   │   ├── res/
 │   │   │   ├── layout/                    # 布局文件
 │   │   │   ├── drawable/                  # 玻璃效果drawable
@@ -83,7 +81,7 @@ GlassProtector/
 
 ### 高强度
 - 全部保护功能开启
-- 包含资源混淆 + 垃圾代码注入 + 卢恩字符混淆 + Dex2C + assets加密
+- 包含资源混淆 + 垃圾代码注入 + Dex2C + assets加密
 - 安全性最高，但加固时间较长，对性能有一定影响
 
 ## 构建说明
@@ -129,13 +127,6 @@ adb install app/build/outputs/apk/release/app-release.apk
 5. 生成壳DEX（包含ProxyApplication、DexLoader、AntiDebug等）
 6. 运行时壳Application启动，解密DEX到内存，通过InMemoryDexClassLoader加载
 7. 同时执行反调试检测和签名校验
-
-### 卢恩字符混淆原理
-1. 扫描APK内的类名/方法名/包名标识符
-2. 将ASCII字符映射为 Elder Futhark 卢恩符文（ᚠᚢᚦᚨᚱᚲ...）
-3. 生成双向映射表，混淆后的标识符在虚拟机中仍然合法
-4. 映射表写入 assets/rune_obf/ 随加固包分发
-5. 加固日志输出混淆统计与前后对照样例
 
 ## 注意事项
 
