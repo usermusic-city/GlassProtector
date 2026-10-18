@@ -51,6 +51,11 @@ android {
     }
 }
 
+configurations.all {
+    // guava-27.1-android.jar 已包含 ListenableFuture，排除 androidx/glide 传递引入的独立 listenablefuture 库，避免重复类
+    exclude group: 'com.google.guava', module: 'listenablefuture'
+}
+
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
     implementation 'androidx.appcompat:appcompat:1.6.1'
